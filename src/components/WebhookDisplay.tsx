@@ -8,11 +8,14 @@ interface WebhookDisplayProps {
 }
 
 export const WebhookDisplay: React.FC<WebhookDisplayProps> = ({
-  webhookUrl,
+  webhookUrl: propWebhookUrl,
   isActive,
   lastReceived
 }) => {
   const [copied, setCopied] = useState(false);
+  
+  // Use Supabase Edge Function URL for webhook
+  const webhookUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook`;
 
   const copyWebhookUrl = async () => {
     try {

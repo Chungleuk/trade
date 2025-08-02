@@ -8,7 +8,7 @@ export const useWebhookAlerts = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [webhookConfig, setWebhookConfig] = useState<WebhookConfig>({
-    url: `${window.location.origin}/api/webhook`,
+    url: `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook`,
     isActive: false
   });
   const [isConnected, setIsConnected] = useState(false);

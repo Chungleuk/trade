@@ -158,17 +158,25 @@ export const useWebhookAlerts = () => {
   // Function to delete an alert
   const deleteAlert = useCallback(async (alertId: string) => {
     try {
+      // Optimistically remove from UI first
+      setAlerts(prev => prev.filter(alert => alert.id !== alertId));
+      
       const { error } = await AlertService.deleteAlert(alertId);
       
       if (error) {
+        // If delete failed, restore the alert in UI
+        const { data: restoredAlerts } = await AlertService.getAlerts({ limit: 100 });
+        setAlerts(restoredAlerts);
         setError(error);
         return false;
       }
       
-      setAlerts(prev => prev.filter(alert => alert.id !== alertId));
       return true;
     } catch (err) {
       console.error('Error deleting alert:', err);
+      // If delete failed, restore the alerts
+      const { data: restoredAlerts } = await AlertService.getAlerts({ limit: 100 });
+      setAlerts(restoredAlerts);
       setError('Failed to delete alert');
       return false;
     }

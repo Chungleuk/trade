@@ -159,6 +159,8 @@ export class AlertService {
   // Delete an alert
   static async deleteAlert(alertId: string): Promise<{ error: string | null }> {
     try {
+      console.log('Attempting to delete alert:', alertId);
+      
       const { error } = await supabase
         .from('trading_alerts')
         .delete()
@@ -169,6 +171,7 @@ export class AlertService {
         return { error: error.message };
       }
 
+      console.log('Alert deleted successfully:', alertId);
       return { error: null };
     } catch (error) {
       console.error('Error in deleteAlert:', error);
@@ -228,6 +231,17 @@ export class AlertService {
         (payload) => {
           const newAlert = mapRowToAlert(payload.new as AlertRow);
           callback(newAlert);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'trading_alerts',
+        },
+        (payload) => {
+          console.log('Alert deleted via real-time:', payload.old);
         }
       )
       .subscribe();

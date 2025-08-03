@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Activity } from 'lucide-react';
-import { WebhookDisplay } from './components/WebhookDisplay';
+import { SimpleWebhookDisplay } from './components/SimpleWebhookDisplay';
 import { SetupInstructions } from './components/SetupInstructions';
 import { AlertsList } from './components/AlertsList';
 import { StatusNotification } from './components/StatusNotification';
@@ -107,11 +107,7 @@ function App() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="space-y-8">
           {/* Webhook Configuration */}
-          <WebhookDisplay
-            webhookUrl={webhookConfig.url}
-            isActive={webhookConfig.isActive}
-            lastReceived={webhookConfig.lastReceived}
-          />
+          <SimpleWebhookDisplay />
 
           {/* Setup Instructions */}
           <SetupInstructions />

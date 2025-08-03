@@ -78,9 +78,9 @@ export const SetupInstructions: React.FC = () => {
           <div className="flex items-start gap-3">
             <ArrowRight className="w-5 h-5 text-blue-600 mt-0.5" />
             <div>
-              <h4 className="font-medium text-blue-900 mb-1">Flexible Alert Processing</h4>
+              <h4 className="font-medium text-blue-900 mb-1">Simple Low-Traffic Solution</h4>
               <p className="text-blue-800 text-sm">
-                Our system automatically detects and parses both JSON format and TradingView strategy messages. You can use either format depending on your preference and setup complexity.
+                For low-traffic scenarios, you can manually submit alerts using the form above, or set up simple webhook services like Webhook.site, Zapier, or email-to-webhook solutions. Perfect for personal trading without complex infrastructure.
               </p>
             </div>
           </div>

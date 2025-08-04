@@ -26,6 +26,22 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // Handle GET requests (when someone clicks the URL in browser)
+  if (req.method === "GET") {
+    return new Response(
+      JSON.stringify({
+        message: "TradingView Webhook Endpoint",
+        status: "Active and ready to receive POST requests",
+        usage: "This endpoint accepts POST requests from TradingView alerts",
+        timestamp: new Date().toISOString()
+      }),
+      {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
+  }
+
   try {
     // Only accept POST requests for webhooks
     if (req.method !== "POST") {

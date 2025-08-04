@@ -9,9 +9,12 @@ export const SimpleWebhookDisplay: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  // Get the correct webhook URL from Supabase
+  const actualWebhookUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook`;
+
   const copyWebhookUrl = async () => {
     try {
-      await navigator.clipboard.writeText(webhookUrl);
+      await navigator.clipboard.writeText(actualWebhookUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (error) {
@@ -73,11 +76,11 @@ export const SimpleWebhookDisplay: React.FC = () => {
         {/* Webhook URL Display */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            Webhook URL (For Reference)
+            TradingView Webhook URL
           </label>
           <div className="flex items-center gap-2">
             <div className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 font-mono text-sm text-gray-800 overflow-x-auto">
-              {webhookUrl}
+              {actualWebhookUrl}
             </div>
             <button
               onClick={copyWebhookUrl}
@@ -144,14 +147,19 @@ export const SimpleWebhookDisplay: React.FC = () => {
 
         {/* Instructions */}
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <h4 className="font-medium text-blue-900 mb-2">Low-Traffic Solution</h4>
+          <h4 className="font-medium text-blue-900 mb-2">Webhook Setup</h4>
           <div className="text-blue-800 text-sm space-y-2">
-            <p>For low-traffic scenarios, you can:</p>
+            <p><strong>For TradingView Webhooks:</strong></p>
             <ul className="list-disc list-inside space-y-1 ml-4">
-              <li>Manually paste TradingView alerts using the form above</li>
-              <li>Set up a simple webhook service like Webhook.site or Zapier</li>
-              <li>Use email-to-webhook services for TradingView email alerts</li>
-              <li>Copy alerts from TradingView and paste them here</li>
+              <li>Copy the webhook URL above</li>
+              <li>In TradingView, create an alert and enable "Webhook URL"</li>
+              <li>Paste the webhook URL into TradingView's webhook field</li>
+              <li>Your alerts will automatically appear in the dashboard</li>
+            </ul>
+            <p className="mt-2"><strong>For Manual Testing:</strong></p>
+            <ul className="list-disc list-inside space-y-1 ml-4">
+              <li>Use the form above to manually submit alerts</li>
+              <li>Click "Test Alert" to create sample data</li>
             </ul>
           </div>
         </div>

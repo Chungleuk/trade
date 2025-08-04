@@ -25,6 +25,12 @@ export const SetupInstructions: React.FC = () => {
       <div className="space-y-6">
         <div className="space-y-4">
           <h3 className="text-lg font-medium text-gray-800">TradingView Configuration</h3>
+          <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+            <h4 className="font-medium text-green-900 mb-2">✅ Working Webhook URL</h4>
+            <p className="text-green-800 text-sm">
+              Your webhook endpoint is now active and ready to receive TradingView alerts!
+            </p>
+          </div>
           <ol className="space-y-3 text-gray-700">
             <li className="flex items-start gap-3">
               <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-medium">1</span>
@@ -36,7 +42,7 @@ export const SetupInstructions: React.FC = () => {
             </li>
             <li className="flex items-start gap-3">
               <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-medium">3</span>
-              <span>Paste your webhook URL from above into the webhook field</span>
+              <span>Paste the webhook URL from the "Simple Webhook Setup" section above</span>
             </li>
             <li className="flex items-start gap-3">
               <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-medium">4</span>
@@ -78,9 +84,9 @@ export const SetupInstructions: React.FC = () => {
           <div className="flex items-start gap-3">
             <ArrowRight className="w-5 h-5 text-blue-600 mt-0.5" />
             <div>
-              <h4 className="font-medium text-blue-900 mb-1">Simple Low-Traffic Solution</h4>
+              <h4 className="font-medium text-blue-900 mb-1">Ready to Receive Alerts</h4>
               <p className="text-blue-800 text-sm">
-                For low-traffic scenarios, you can manually submit alerts using the form above, or set up simple webhook services like Webhook.site, Zapier, or email-to-webhook solutions. Perfect for personal trading without complex infrastructure.
+                Your webhook endpoint is now live and can receive POST requests from TradingView. Alerts will automatically appear in your dashboard in real-time. You can also manually submit alerts using the form above for testing.
               </p>
             </div>
           </div>

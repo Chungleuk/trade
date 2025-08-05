@@ -108,63 +108,54 @@ Sent from TradingView Alert Dashboard
 // Final fallback - log the notification
 async function sendSimpleNotification(alert: any) {
   try {
-    // As a last resort, we'll use a simple HTTP request to a logging service
-    // This ensures we at least have a record of the attempt
-    const logData = {
-      timestamp: new Date().toISOString(),
-      type: "trading_alert",
-      recipient: "leechungleuk@gmail.com",
-      alert: {
-        action: alert.action,
-        symbol: alert.symbol,
-        entry: alert.entry,
-        target: alert.target,
-        stop: alert.stop,
-        timeframe: alert.timeframe || "15",
-        raw_message: alert.rawMessage
-      }
-    };
+    // Use Web3Forms with your access key
+    const formData = new FormData();
+    formData.append("access_key", "a2927d87-5196-4690-a8dc-d06dcb7634f8");
+    formData.append("email", "leechungleuk@gmail.com");
+    formData.append("subject", `🚨 Trading Alert: ${alert.action} ${alert.symbol}`);
+    formData.append("message", `
+🚨 NEW TRADING ALERT 🚨
 
-    console.log("📧 EMAIL NOTIFICATION FOR leechungleuk@gmail.com:", logData);
+Action: ${alert.action}
+Symbol: ${alert.symbol}
+Entry Price: ${alert.entry}
+Timeframe: ${alert.timeframe || "15"}m
+${alert.target ? `Target: ${alert.target}` : ''}
+${alert.stop ? `Stop Loss: ${alert.stop}` : ''}
+${alert.rr ? `Risk/Reward: ${alert.rr}` : ''}
+
+Time: ${new Date().toLocaleString()}
+
+Original Message:
+${alert.rawMessage || JSON.stringify(alert, null, 2)}
+
+---
+Sent from TradingView Alert Dashboard
+    `);
+    formData.append("from_name", "TradingView Alert System");
     
-    // Try one more simple email service
     const response = await fetch("https://api.web3forms.com/submit", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        access_key: "YOUR_WEB3FORMS_KEY", // You can get this free from web3forms.com
-        email: "leechungleuk@gmail.com",
-        subject: `🚨 Trading Alert: ${alert.action} ${alert.symbol}`,
-        message: `
-Trading Alert Details:
-- Action: ${alert.action}
-- Symbol: ${alert.symbol}  
-- Entry: ${alert.entry}
-- Target: ${alert.target || 'N/A'}
-- Stop: ${alert.stop || 'N/A'}
-- Time: ${new Date().toLocaleString()}
-
-Raw Data: ${alert.rawMessage || JSON.stringify(alert)}
-        `
-      })
+      body: formData
     });
 
-    if (response.ok) {
-      console.log("Email sent via Web3Forms");
-      return true;
-    }
+    const data = await response.json();
     
-    return true;
+    if (response.ok) {
+      console.log("✅ Email sent successfully via Web3Forms:", data);
+      return true;
+    } else {
+      console.error("❌ Web3Forms error:", data);
+      return false;
+    }
   } catch (error) {
-    console.error("Final email fallback failed:", error);
+    console.error("❌ Web3Forms request failed:", error);
     console.log("📧 ALERT NOTIFICATION (Email failed):", {
       recipient: "leechungleuk@gmail.com",
       alert: alert,
       timestamp: new Date().toISOString()
     });
-    return true; // Don't fail the webhook if email fails
+    return false;
   }
 }
 

@@ -9,7 +9,7 @@ type AlertUpdate = Database['public']['Tables']['trading_alerts']['Update'];
 
 // Convert database row to TradingAlert type
 const mapRowToAlert = (row: AlertRow): TradingAlert => ({
-  id: row.alert_id,
+  id: row.id,
   action: row.action,
   symbol: row.symbol,
   timeframe: row.timeframe,
@@ -35,7 +35,7 @@ const mapAlertToInsert = (alert: Omit<TradingAlert, 'timestamp'>): AlertInsert =
   stop: alert.stop || null,
   rr: alert.rr || null,
   risk: alert.risk || null,
-  alert_id: alert.id,
+  alert_id: alert.id, // Keep this for backward compatibility
   message: alert.rawMessage || alert.message || null,
   status: alert.status || 'active',
   outcome: alert.outcome || null,
@@ -143,7 +143,7 @@ export class AlertService {
       const { data, error } = await supabase
         .from('trading_alerts')
         .update(updates)
-        .eq('alert_id', alertId)
+        .eq('id', alertId)
         .select();
 
       if (error) {
@@ -178,7 +178,7 @@ export class AlertService {
       const { error } = await supabase
         .from('trading_alerts')
         .delete()
-        .eq('alert_id', alertId);
+        .eq('id', alertId);
 
       if (error) {
         console.error('Error deleting alert:', error);

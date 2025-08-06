@@ -20,6 +20,7 @@ const mapRowToAlert = (row: AlertRow): TradingAlert => ({
   risk: row.risk || undefined,
   timestamp: row.created_at,
   status: row.status,
+  outcome: row.outcome || undefined,
   message: row.message || undefined,
   rawMessage: row.message || undefined, // Store raw message for reference
 });
@@ -37,6 +38,7 @@ const mapAlertToInsert = (alert: Omit<TradingAlert, 'timestamp'>): AlertInsert =
   alert_id: alert.id,
   message: alert.rawMessage || alert.message || null,
   status: alert.status || 'active',
+  outcome: alert.outcome || null,
 });
 
 export class AlertService {

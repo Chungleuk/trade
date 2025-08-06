@@ -10,6 +10,7 @@ export interface TradingAlert {
   risk?: string;
   timestamp: string;
   status?: 'active' | 'completed' | 'stopped';
+  outcome?: 'win' | 'loss' | 'breakeven';
   message?: string;
   rawMessage?: string; // Store the original TradingView message
   strategyName?: string; // Extract strategy name if available

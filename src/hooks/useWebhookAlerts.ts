@@ -182,6 +182,30 @@ export const useWebhookAlerts = () => {
     }
   }, []);
 
+  // Function to update alert outcome
+  const updateAlertOutcome = useCallback(async (alertId: string, outcome: 'win' | 'loss' | 'breakeven') => {
+    try {
+      const { data: updatedAlert, error } = await AlertService.updateAlert(alertId, { outcome });
+      
+      if (error) {
+        setError(error);
+        return false;
+      }
+      
+      if (updatedAlert) {
+        setAlerts(prev => prev.map(alert => 
+          alert.id === alertId ? updatedAlert : alert
+        ));
+      }
+      
+      return true;
+    } catch (err) {
+      console.error('Error updating alert outcome:', err);
+      setError('Failed to update alert outcome');
+      return false;
+    }
+  }, []);
+
   // Function to clear all alerts
   const clearAlerts = useCallback(() => {
     setAlerts([]);
@@ -197,6 +221,7 @@ export const useWebhookAlerts = () => {
     handleNewAlert,
     fetchAlerts,
     updateAlertStatus,
+    updateAlertOutcome,
     deleteAlert,
     clearAlerts
   };

@@ -23,6 +23,7 @@ export interface Database {
           alert_id: string
           message: string | null
           status: 'active' | 'completed' | 'stopped'
+          outcome: 'win' | 'loss' | 'breakeven' | null
           created_at: string
           updated_at: string
         }
@@ -39,6 +40,7 @@ export interface Database {
           alert_id: string
           message?: string | null
           status?: 'active' | 'completed' | 'stopped'
+          outcome?: 'win' | 'loss' | 'breakeven' | null
           created_at?: string
           updated_at?: string
         }
@@ -55,6 +57,7 @@ export interface Database {
           alert_id?: string
           message?: string | null
           status?: 'active' | 'completed' | 'stopped'
+          outcome?: 'win' | 'loss' | 'breakeven' | null
           created_at?: string
           updated_at?: string
         }

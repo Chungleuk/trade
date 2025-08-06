@@ -15,6 +15,7 @@ function App() {
     isConnected, 
     fetchAlerts, 
     updateAlertStatus, 
+    updateAlertOutcome,
     deleteAlert 
   } = useWebhookAlerts();
   const [notification, setNotification] = useState<{
@@ -52,6 +53,15 @@ function App() {
       } else {
         showNotification('Failed to delete alert', 'error');
       }
+    }
+  };
+
+  const handleMarkOutcome = async (alertId: string, outcome: 'win' | 'loss' | 'breakeven') => {
+    const success = await updateAlertOutcome(alertId, outcome);
+    if (success) {
+      showNotification(`Alert marked as ${outcome}`, 'success');
+    } else {
+      showNotification('Failed to update alert outcome', 'error');
     }
   };
 
@@ -119,6 +129,7 @@ function App() {
             error={error}
             onRefresh={handleRefresh}
             onUpdateStatus={handleUpdateStatus}
+            onMarkOutcome={handleMarkOutcome}
             onDelete={handleDeleteAlert}
           />
         </div>

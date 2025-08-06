@@ -9,6 +9,7 @@ interface AlertsListProps {
   error?: string | null;
   onRefresh?: () => void;
   onUpdateStatus?: (alertId: string, status: 'active' | 'completed' | 'stopped') => void;
+  onMarkOutcome?: (alertId: string, outcome: 'win' | 'loss' | 'breakeven') => void;
   onDelete?: (alertId: string) => void;
 }
 
@@ -18,6 +19,7 @@ export const AlertsList: React.FC<AlertsListProps> = ({
   error, 
   onRefresh, 
   onUpdateStatus, 
+  onMarkOutcome,
   onDelete 
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -160,6 +162,7 @@ export const AlertsList: React.FC<AlertsListProps> = ({
               key={alert.id} 
               alert={alert} 
               onUpdateStatus={onUpdateStatus}
+              onMarkOutcome={onMarkOutcome}
               onDelete={onDelete}
             />
           ))

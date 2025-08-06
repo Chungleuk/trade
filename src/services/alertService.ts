@@ -138,19 +138,31 @@ export class AlertService {
   // Update an existing alert
   static async updateAlert(alertId: string, updates: Partial<AlertUpdate>): Promise<{ data: TradingAlert | null; error: string | null }> {
     try {
+      console.log('Updating alert:', alertId, 'with updates:', updates);
+      
       const { data, error } = await supabase
         .from('trading_alerts')
         .update(updates)
         .eq('alert_id', alertId)
-        .select()
-        .single();
+        .select();
 
       if (error) {
         console.error('Error updating alert:', error);
         return { data: null, error: error.message };
       }
 
-      const updatedAlert = mapRowToAlert(data);
+      if (!data || data.length === 0) {
+        console.error('No alert found with ID:', alertId);
+        return { data: null, error: 'Alert not found' };
+      }
+
+      if (data.length > 1) {
+        console.error('Multiple alerts found with ID:', alertId);
+        return { data: null, error: 'Multiple alerts found with same ID' };
+      }
+
+      const updatedAlert = mapRowToAlert(data[0]);
+      console.log('Alert updated successfully:', updatedAlert);
       return { data: updatedAlert, error: null };
     } catch (error) {
       console.error('Error in updateAlert:', error);

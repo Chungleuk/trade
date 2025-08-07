@@ -185,17 +185,28 @@ export const useWebhookAlerts = () => {
   // Function to update alert outcome
   const updateAlertOutcome = useCallback(async (alertId: string, outcome: 'win' | 'loss' | 'breakeven') => {
     try {
+      console.log('=== UPDATE OUTCOME DEBUG ===');
+      console.log('Updating outcome for alert ID:', alertId);
+      console.log('New outcome:', outcome);
+      console.log('Current alerts:', alerts.map(a => ({ id: a.id, symbol: a.symbol })));
+      
       const { data: updatedAlert, error } = await AlertService.updateAlert(alertId, { outcome });
       
       if (error) {
+        console.error('Update outcome error:', error);
         setError(error);
         return false;
       }
       
       if (updatedAlert) {
+        console.log('Successfully updated alert outcome:', updatedAlert);
         setAlerts(prev => prev.map(alert => 
           alert.id === alertId ? updatedAlert : alert
         ));
+      } else {
+        console.error('No updated alert returned');
+        setError('No updated alert returned');
+        return false;
       }
       
       return true;

@@ -138,30 +138,52 @@ export class AlertService {
   // Update an existing alert
   static async updateAlert(alertId: string, updates: Partial<AlertUpdate>): Promise<{ data: TradingAlert | null; error: string | null }> {
     try {
-      console.log('Updating alert:', alertId, 'with updates:', updates);
+      console.log('=== UPDATE ALERT DEBUG ===');
+      console.log('Alert ID to update:', alertId);
+      console.log('Updates to apply:', updates);
+      console.log('Alert ID type:', typeof alertId);
+      console.log('Alert ID length:', alertId.length);
       
+      // First, let's check if the alert exists
+      const { data: existingAlert, error: fetchError } = await supabase
+        .from('trading_alerts')
+        .select('*')
+        .eq('id', alertId)
+        .single();
+
+      console.log('Existing alert check:', { existingAlert, fetchError });
+
+      if (fetchError) {
+        console.error('Alert not found during existence check:', fetchError);
+        return { data: null, error: `Alert not found: ${fetchError.message}` };
+      }
+
+      if (!existingAlert) {
+        console.error('No alert found with ID:', alertId);
+        return { data: null, error: 'Alert not found' };
+      }
+
+      // Now perform the update
       const { data, error } = await supabase
         .from('trading_alerts')
         .update(updates)
         .eq('id', alertId)
-        .select();
+        .select()
+        .single();
+
+      console.log('Update result:', { data, error });
 
       if (error) {
         console.error('Error updating alert:', error);
         return { data: null, error: error.message };
       }
 
-      if (!data || data.length === 0) {
-        console.error('No alert found with ID:', alertId);
-        return { data: null, error: 'Alert not found' };
+      if (!data) {
+        console.error('Update returned no data for ID:', alertId);
+        return { data: null, error: 'Update failed - no data returned' };
       }
 
-      if (data.length > 1) {
-        console.error('Multiple alerts found with ID:', alertId);
-        return { data: null, error: 'Multiple alerts found with same ID' };
-      }
-
-      const updatedAlert = mapRowToAlert(data[0]);
+      const updatedAlert = mapRowToAlert(data);
       console.log('Alert updated successfully:', updatedAlert);
       return { data: updatedAlert, error: null };
     } catch (error) {

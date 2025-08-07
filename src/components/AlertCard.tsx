@@ -241,6 +241,9 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
                       <hr className="my-1" />
                       <button
                         onClick={() => {
+                          console.log('Marking alert as breakeven, ID:', alert.id);
+                          console.log('Marking alert as loss, ID:', alert.id);
+                          console.log('Marking alert as win, ID:', alert.id);
                           onDelete(alert.id);
                           setShowActions(false);
                         }}

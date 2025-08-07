@@ -145,45 +145,53 @@ export class AlertService {
       console.log('Alert ID length:', alertId.length);
       
       // First, let's check if the alert exists
-      const { data: existingAlert, error: fetchError } = await supabase
+      const { data: existingAlerts, error: fetchError } = await supabase
         .from('trading_alerts')
         .select('*')
-        .eq('id', alertId)
-        .single();
+        .eq('id', alertId);
 
-      console.log('Existing alert check:', { existingAlert, fetchError });
+      console.log('Existing alert check:', { existingAlerts, fetchError });
 
       if (fetchError) {
         console.error('Alert not found during existence check:', fetchError);
         return { data: null, error: `Alert not found: ${fetchError.message}` };
       }
 
-      if (!existingAlert) {
+      if (!existingAlerts || existingAlerts.length === 0) {
         console.error('No alert found with ID:', alertId);
         return { data: null, error: 'Alert not found' };
       }
 
+      if (existingAlerts.length > 1) {
+        console.error('Multiple alerts found with same ID:', alertId);
+        return { data: null, error: 'Multiple alerts found with same ID' };
+      }
+
       // Now perform the update
-      const { data, error } = await supabase
+      const { data: updateData, error } = await supabase
         .from('trading_alerts')
         .update(updates)
         .eq('id', alertId)
-        .select()
-        .single();
+        .select();
 
-      console.log('Update result:', { data, error });
+      console.log('Update result:', { updateData, error });
 
       if (error) {
         console.error('Error updating alert:', error);
         return { data: null, error: error.message };
       }
 
-      if (!data) {
+      if (!updateData || updateData.length === 0) {
         console.error('Update returned no data for ID:', alertId);
         return { data: null, error: 'Update failed - no data returned' };
       }
 
-      const updatedAlert = mapRowToAlert(data);
+      if (updateData.length > 1) {
+        console.error('Update returned multiple rows for ID:', alertId);
+        return { data: null, error: 'Update returned multiple rows' };
+      }
+
+      const updatedAlert = mapRowToAlert(updateData[0]);
       console.log('Alert updated successfully:', updatedAlert);
       return { data: updatedAlert, error: null };
     } catch (error) {

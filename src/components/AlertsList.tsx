@@ -1,0 +1,390 @@
+import React, { useMemo, useState } from 'react';
+import { Search, Filter, TrendingUp, AlertTriangle, RefreshCw, Loader2, Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { TradingAlert } from '../types/alert';
+import { AlertCard } from './AlertCard';
+
+interface AlertsListProps {
+  alerts: TradingAlert[];
+  loading?: boolean;
+  error?: string | null;
+  onRefresh?: () => void;
+  onUpdateStatus?: (alertId: string, status: 'active' | 'completed' | 'stopped') => void;
+  onMarkOutcome?: (alertId: string, outcome: 'win' | 'loss') => void;
+  onDelete?: (alertId: string) => void;
+}
+
+export const AlertsList: React.FC<AlertsListProps> = ({ 
+  alerts, 
+  loading = false, 
+  error, 
+  onRefresh, 
+  onUpdateStatus, 
+  onMarkOutcome,
+  onDelete 
+}) => {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterAction, setFilterAction] = useState<'ALL' | 'BUY' | 'SELL'>('ALL');
+  const [filterStatus, setFilterStatus] = useState<'ALL' | 'active' | 'completed' | 'stopped'>('ALL');
+  const [groupDropdownOpen, setGroupDropdownOpen] = useState(false);
+  const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(100);
+
+  const allGroups = useMemo(() => {
+    const set = new Set<string>();
+    alerts.forEach(a => set.add(a.symbol.toUpperCase()));
+    return Array.from(set).sort();
+  }, [alerts]);
+
+  const filteredAlerts = useMemo(() => {
+    return alerts.filter(alert => {
+      const matchesSearch = alert.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                           alert.id.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesFilter = filterAction === 'ALL' || alert.action === filterAction;
+      const matchesStatus = filterStatus === 'ALL' || alert.status === filterStatus;
+      const matchesGroup = selectedGroups.length === 0
+        ? true
+        : selectedGroups.includes(alert.symbol.toUpperCase());
+      return matchesSearch && matchesFilter && matchesStatus && matchesGroup;
+    });
+  }, [alerts, searchTerm, filterAction, filterStatus, selectedGroups]);
+
+  // Pagination calculations
+  const totalPages = Math.ceil(filteredAlerts.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentAlerts = filteredAlerts.slice(startIndex, endIndex);
+
+  // Reset to first page when filters change
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, filterAction, filterStatus, selectedGroups, itemsPerPage]);
+
+  const goToPage = (page: number) => {
+    setCurrentPage(Math.max(1, Math.min(page, totalPages)));
+  };
+
+  const goToFirstPage = () => goToPage(1);
+  const goToLastPage = () => goToPage(totalPages);
+  const goToPreviousPage = () => goToPage(currentPage - 1);
+  const goToNextPage = () => goToPage(currentPage + 1);
+
+  const LoadingState = () => (
+    <div className="text-center py-12">
+      <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-4" />
+      <h3 className="text-lg font-medium text-gray-900 mb-2">Loading alerts...</h3>
+      <p className="text-gray-600">Please wait while we fetch your trading alerts.</p>
+    </div>
+  );
+
+  const ErrorState = () => (
+    <div className="text-center py-12">
+      <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+        <AlertTriangle className="w-8 h-8 text-red-600" />
+      </div>
+      <h3 className="text-lg font-medium text-gray-900 mb-2">Error loading alerts</h3>
+      <p className="text-gray-600 mb-4">{error}</p>
+      {onRefresh && (
+        <button
+          onClick={onRefresh}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Try Again
+        </button>
+      )}
+    </div>
+  );
+
+  const EmptyState = () => (
+    <div className="text-center py-12">
+      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+        <TrendingUp className="w-8 h-8 text-gray-400" />
+      </div>
+      <h3 className="text-lg font-medium text-gray-900 mb-2">No alerts yet</h3>
+      <p className="text-gray-600 max-w-sm mx-auto">
+        Configure your TradingView alerts to start receiving signals. Once set up, your alerts will appear here in real-time.
+      </p>
+    </div>
+  );
+
+  const NoResultsState = () => (
+    <div className="text-center py-12">
+      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+        <AlertTriangle className="w-8 h-8 text-gray-400" />
+      </div>
+      <h3 className="text-lg font-medium text-gray-900 mb-2">No alerts match your filters</h3>
+      <p className="text-gray-600">Try adjusting your search terms or filters.</p>
+    </div>
+  );
+
+  const PaginationControls = () => {
+    if (totalPages <= 1) return null;
+
+    const getPageNumbers = () => {
+      const pages = [];
+      const maxVisiblePages = 5;
+      
+      if (totalPages <= maxVisiblePages) {
+        for (let i = 1; i <= totalPages; i++) {
+          pages.push(i);
+        }
+      } else {
+        if (currentPage <= 3) {
+          for (let i = 1; i <= 4; i++) {
+            pages.push(i);
+          }
+          pages.push('...');
+          pages.push(totalPages);
+        } else if (currentPage >= totalPages - 2) {
+          pages.push(1);
+          pages.push('...');
+          for (let i = totalPages - 3; i <= totalPages; i++) {
+            pages.push(i);
+          }
+        } else {
+          pages.push(1);
+          pages.push('...');
+          for (let i = currentPage - 1; i <= currentPage + 1; i++) {
+            pages.push(i);
+          }
+          pages.push('...');
+          pages.push(totalPages);
+        }
+      }
+      
+      return pages;
+    };
+
+    return (
+      <div className="flex items-center justify-between px-4 py-3 bg-white border-t border-gray-200">
+        <div className="flex items-center gap-4 text-sm text-gray-700">
+          <span>
+            Showing {startIndex + 1} to {Math.min(endIndex, filteredAlerts.length)} of {filteredAlerts.length} alerts
+          </span>
+          
+          <div className="flex items-center gap-2">
+            <span>Show:</span>
+            <select
+              value={itemsPerPage}
+              onChange={(e) => setItemsPerPage(Number(e.target.value))}
+              className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={200}>200</option>
+              <option value={500}>500</option>
+            </select>
+            <span>per page</span>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-1">
+          <button
+            onClick={goToFirstPage}
+            disabled={currentPage === 1}
+            className="p-2 text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg hover:bg-gray-100"
+            title="First page"
+          >
+            <ChevronsLeft className="w-4 h-4" />
+          </button>
+          
+          <button
+            onClick={goToPreviousPage}
+            disabled={currentPage === 1}
+            className="p-2 text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg hover:bg-gray-100"
+            title="Previous page"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          
+          <div className="flex items-center gap-1">
+            {getPageNumbers().map((page, index) => (
+              <React.Fragment key={index}>
+                {page === '...' ? (
+                  <span className="px-3 py-2 text-gray-500">...</span>
+                ) : (
+                  <button
+                    onClick={() => goToPage(page as number)}
+                    className={`px-3 py-2 text-sm rounded-lg transition-colors ${
+                      currentPage === page
+                        ? 'bg-blue-600 text-white'
+                        : 'text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    {page}
+                  </button>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+          
+          <button
+            onClick={goToNextPage}
+            disabled={currentPage === totalPages}
+            className="p-2 text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg hover:bg-gray-100"
+            title="Next page"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+          
+          <button
+            onClick={goToLastPage}
+            disabled={currentPage === totalPages}
+            className="p-2 text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg hover:bg-gray-100"
+            title="Last page"
+          >
+            <ChevronsRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
+        <div>
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-semibold text-gray-900">
+              Trading Alerts ({filteredAlerts.length})
+            </h2>
+            {onRefresh && (
+              <button
+                onClick={onRefresh}
+                disabled={loading}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50"
+                title="Refresh alerts"
+              >
+                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              </button>
+            )}
+          </div>
+          <p className="text-gray-600 text-sm mt-1">
+            Real-time alerts from your TradingView strategies
+            {totalPages > 1 && ` • Page ${currentPage} of ${totalPages}`}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-3 w-full sm:w-auto">
+          <div className="relative flex-1 sm:flex-initial">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <input
+              type="text"
+              placeholder="Search alerts..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full sm:w-64"
+            />
+          </div>
+
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setGroupDropdownOpen(v => !v)}
+              className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm"
+              title="Filter by symbol group"
+            >
+              <Filter className="w-4 h-4 text-gray-500" />
+              Groups
+              {selectedGroups.length > 0 && (
+                <span className="ml-1 text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">
+                  {selectedGroups.length}
+                </span>
+              )}
+            </button>
+
+            {groupDropdownOpen && (
+              <div className="absolute z-10 mt-2 w-56 bg-white border border-gray-200 rounded-lg shadow-lg p-2">
+                <div className="flex items-center justify-between px-2 py-1">
+                  <span className="text-xs font-medium text-gray-600">Select groups</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedGroups([])}
+                    className="text-xs text-blue-600 hover:underline"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <div className="max-h-56 overflow-auto">
+                  {allGroups.length === 0 && (
+                    <div className="px-2 py-1 text-sm text-gray-500">No symbols</div>
+                  )}
+                  {allGroups.map(group => {
+                    const selected = selectedGroups.includes(group);
+                    return (
+                      <button
+                        type="button"
+                        key={group}
+                        onClick={() => setSelectedGroups(prev => selected ? prev.filter(g => g !== group) : [...prev, group])}
+                        className={`w-full flex items-center justify-between px-2 py-1 text-sm rounded hover:bg-gray-50 ${selected ? 'text-gray-900' : 'text-gray-700'}`}
+                      >
+                        <span>{group}</span>
+                        {selected && <Check className="w-4 h-4 text-blue-600" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="relative">
+            <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <select
+              value={filterAction}
+              onChange={(e) => setFilterAction(e.target.value as 'ALL' | 'BUY' | 'SELL')}
+              className="pl-10 pr-8 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent appearance-none bg-white"
+            >
+              <option value="ALL">All Actions</option>
+              <option value="BUY">Buy Only</option>
+              <option value="SELL">Sell Only</option>
+            </select>
+          </div>
+          
+          <div className="relative">
+            <select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value as 'ALL' | 'active' | 'completed' | 'stopped')}
+              className="pl-4 pr-8 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent appearance-none bg-white"
+            >
+              <option value="ALL">All Status</option>
+              <option value="active">Active</option>
+              <option value="completed">Completed</option>
+              <option value="stopped">Stopped</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="space-y-3">
+          {loading ? (
+            <LoadingState />
+          ) : error ? (
+            <ErrorState />
+          ) : alerts.length === 0 ? (
+            <EmptyState />
+          ) : filteredAlerts.length === 0 ? (
+            <NoResultsState />
+          ) : (
+            <>
+              <div className="p-4">
+                {currentAlerts.map((alert) => (
+                  <AlertCard 
+                    key={alert.id} 
+                    alert={alert} 
+                    onUpdateStatus={onUpdateStatus}
+                    onMarkOutcome={onMarkOutcome}
+                    onDelete={onDelete}
+                  />
+                ))}
+              </div>
+              <PaginationControls />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};

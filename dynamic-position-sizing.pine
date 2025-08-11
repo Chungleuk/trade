@@ -1,0 +1,312 @@
+//@version=5
+indicator("Dynamic Position Sizing System", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// CONFIGURATION SECTION
+// ============================================================================
+
+// Account Settings
+var float accountBalance = input.float(100000, "Account Balance ($)", minval=1000)
+var float maxRiskPercent = input.float(10.0, "Max Risk % of Account", minval=1.0, maxval=50.0)
+var float maxRiskAmount = accountBalance * (maxRiskPercent / 100)
+
+// Broker Cost Configuration
+var float commissionRate = input.float(0.0001, "Commission Rate (%)", minval=0.0, maxval=0.01)
+var float spreadPips = input.float(1.0, "Spread (Pips)", minval=0.1, maxval=10.0)
+var float swapRate = input.float(0.0001, "Swap Rate (Daily)", minval=-0.01, maxval=0.01)
+var float slippagePips = input.float(0.5, "Slippage (Pips)", minval=0.0, maxval=5.0)
+
+// Decision Tree Configuration
+var string currentNode = input.string("Start", "Current Decision Tree Node")
+var bool enableCostAdjustment = input.bool(true, "Enable Cost Adjustment")
+var int maxIterations = input.int(10, "Max Iterations", minval=5, maxval=20)
+var float tolerance = input.float(0.01, "Tolerance ($)", minval=0.001, maxval=1.0)
+
+// Display Settings
+var bool showLabels = input.bool(true, "Show Position Labels")
+var bool showCosts = input.bool(true, "Show Cost Breakdown")
+var color labelColor = input.color(color.blue, "Label Color")
+var color costColor = input.color(color.red, "Cost Color")
+
+// ============================================================================
+// DECISION TREE STRUCTURE
+// ============================================================================
+
+// Decision tree nodes with position sizing percentages
+var decisionTree = array.new<string>()
+var positionSizes = array.new<float>()
+
+// Initialize decision tree
+if barstate.isfirst
+    // Level 1
+    array.push(decisionTree, "Start")
+    array.push(positionSizes, 0.65)
+    
+    // Level 2
+    array.push(decisionTree, "1-0")
+    array.push(positionSizes, 0.58)
+    array.push(decisionTree, "0-1")
+    array.push(positionSizes, 0.73)
+    
+    // Level 3
+    array.push(decisionTree, "2-0")
+    array.push(positionSizes, 0.44)
+    array.push(decisionTree, "1-1")
+    array.push(positionSizes, 0.73)
+    array.push(decisionTree, "0-2")
+    array.push(positionSizes, 0.73)
+    
+    // Level 4
+    array.push(decisionTree, "3-0")
+    array.push(positionSizes, 0.25)
+    array.push(decisionTree, "2-1")
+    array.push(positionSizes, 0.62)
+    array.push(decisionTree, "1-2")
+    array.push(positionSizes, 0.83)
+    array.push(decisionTree, "0-3")
+    array.push(positionSizes, 0.62)
+    
+    // Level 5
+    array.push(decisionTree, "4-0")
+    array.push(positionSizes, 0.08)
+    array.push(decisionTree, "3-1")
+    array.push(positionSizes, 0.41)
+    array.push(decisionTree, "2-2")
+    array.push(positionSizes, 0.83)
+    array.push(decisionTree, "1-3")
+    array.push(positionSizes, 0.83)
+    array.push(decisionTree, "0-4")
+    array.push(positionSizes, 0.41)
+    
+    // Level 6
+    array.push(decisionTree, "4-1")
+    array.push(positionSizes, 0.17)
+    array.push(decisionTree, "3-2")
+    array.push(positionSizes, 0.66)
+    array.push(decisionTree, "2-3")
+    array.push(positionSizes, 0.99)
+    array.push(decisionTree, "1-4")
+    array.push(positionSizes, 0.66)
+    array.push(decisionTree, "0-5")
+    array.push(positionSizes, 0.17)
+    
+    // Level 7
+    array.push(decisionTree, "4-2")
+    array.push(positionSizes, 0.33)
+    array.push(decisionTree, "3-3")
+    array.push(positionSizes, 0.99)
+    array.push(decisionTree, "2-4")
+    array.push(positionSizes, 0.99)
+    array.push(decisionTree, "1-5")
+    array.push(positionSizes, 0.33)
+    
+    // Level 8
+    array.push(decisionTree, "4-3")
+    array.push(positionSizes, 0.66)
+    array.push(decisionTree, "3-4")
+    array.push(positionSizes, 1.33)
+    array.push(decisionTree, "2-5")
+    array.push(positionSizes, 0.66)
+    
+    // Level 9
+    array.push(decisionTree, "4-4")
+    array.push(positionSizes, 1.33)
+    array.push(decisionTree, "3-5")
+    array.push(positionSizes, 1.33)
+    
+    // Level 10
+    array.push(decisionTree, "4-5")
+    array.push(positionSizes, 2.65)
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Get position size for current node
+getPositionSize(node) =>
+    size = 0.65  // Default to Start node
+    for i = 0 to array.size(decisionTree) - 1
+        if array.get(decisionTree, i) == node
+            size := array.get(positionSizes, i)
+            break
+    size
+
+// Calculate basic costs
+calculateCommission(amount, price) =>
+    amount * (commissionRate / 100)
+
+calculateSpreadCost(amount, spread, price) =>
+    pipValue = price * 0.0001  // Assuming 4 decimal places
+    spreadCost = (spread * pipValue) * (amount / price)
+    spreadCost
+
+calculateSwapCost(amount, price, days) =>
+    dailySwap = amount * (swapRate / 100)
+    dailySwap * days
+
+calculateSlippageCost(amount, slippage, price) =>
+    pipValue = price * 0.0001
+    slippageCost = (slippage * pipValue) * (amount / price)
+    slippageCost
+
+// Calculate total costs
+calculateTotalCosts(amount, price, spread, slippage, days) =>
+    commission = calculateCommission(amount, price)
+    spreadCost = calculateSpreadCost(amount, spread, price)
+    swapCost = calculateSwapCost(amount, price, days)
+    slippageCost = calculateSlippageCost(amount, slippage, price)
+    total = commission + spreadCost + swapCost + slippageCost
+    [total, commission, spreadCost, swapCost, slippageCost]
+
+// ============================================================================
+// DYNAMIC POSITION SIZING ALGORITHM
+// ============================================================================
+
+// Main position sizing function with cost adjustment
+calculateAdjustedPositionSize(targetNetProfit, entryPrice, targetPrice, stopPrice) =>
+    // Get base position size from decision tree
+    basePercentage = getPositionSize(currentNode)
+    nominalAmount = accountBalance * (basePercentage / 100)
+    
+    // If cost adjustment is disabled, return nominal amount
+    if not enableCostAdjustment
+        [nominalAmount, 0, 0, 0, 0, 0]
+    else
+        // Initialize iterative calculation
+        currentStake = targetNetProfit / 0.01  // Assume 1% return initially
+        iterations = 0
+        converged = false
+        
+        // Iterative adjustment loop
+        while iterations < maxIterations and not converged
+            // Calculate costs for current stake
+            [totalCosts, commission, spreadCost, swapCost, slippageCost] = calculateTotalCosts(
+                currentStake, entryPrice, spreadPips, slippagePips, 1)
+            
+            // Calculate actual net profit
+            priceDifference = math.abs(targetPrice - entryPrice)
+            priceRatio = priceDifference / entryPrice
+            grossProfit = currentStake * priceRatio
+            actualNetProfit = grossProfit - totalCosts
+            
+            // Check convergence
+            difference = math.abs(actualNetProfit - targetNetProfit)
+            if difference <= tolerance
+                converged := true
+            else
+                // Adjust stake based on difference
+                adjustmentFactor = targetNetProfit / actualNetProfit
+                currentStake := currentStake * adjustmentFactor
+                
+                // Ensure we don't exceed maximum risk
+                if currentStake > maxRiskAmount
+                    currentStake := maxRiskAmount
+                    break
+                
+                iterations := iterations + 1
+        
+        // Final calculation
+        [finalTotalCosts, finalCommission, finalSpreadCost, finalSwapCost, finalSlippageCost] = calculateTotalCosts(
+            currentStake, entryPrice, spreadPips, slippagePips, 1)
+        
+        [currentStake, finalTotalCosts, finalCommission, finalSpreadCost, finalSwapCost, finalSlippageCost]
+
+// ============================================================================
+// SIGNAL GENERATION AND POSITION SIZING
+// ============================================================================
+
+// Example signal conditions (modify as needed)
+longCondition = ta.crossover(ta.sma(close, 20), ta.sma(close, 50))
+shortCondition = ta.crossunder(ta.sma(close, 20), ta.sma(close, 50))
+
+// Calculate position sizes when signals occur
+if longCondition
+    entryPrice = close
+    targetPrice = close * 1.01  // 1% target
+    stopPrice = close * 0.99    // 1% stop
+    
+    [positionSize, totalCosts, commission, spreadCost, swapCost, slippageCost] = calculateAdjustedPositionSize(
+        accountBalance * 0.0065, entryPrice, targetPrice, stopPrice)
+    
+    if showLabels
+        label.new(bar_index, low, 
+            "LONG\nSize: $" + str.tostring(positionSize, "#.##") + 
+            "\nCosts: $" + str.tostring(totalCosts, "#.##"), 
+            color=labelColor, style=label.style_label_up, textcolor=color.white)
+    
+    if showCosts
+        label.new(bar_index, high, 
+            "Costs:\nCommission: $" + str.tostring(commission, "#.##") + 
+            "\nSpread: $" + str.tostring(spreadCost, "#.##") + 
+            "\nSwap: $" + str.tostring(swapCost, "#.##") + 
+            "\nSlippage: $" + str.tostring(slippageCost, "#.##"), 
+            color=costColor, style=label.style_label_down, textcolor=color.white)
+
+if shortCondition
+    entryPrice = close
+    targetPrice = close * 0.99  // 1% target
+    stopPrice = close * 1.01    // 1% stop
+    
+    [positionSize, totalCosts, commission, spreadCost, swapCost, slippageCost] = calculateAdjustedPositionSize(
+        accountBalance * 0.0065, entryPrice, targetPrice, stopPrice)
+    
+    if showLabels
+        label.new(bar_index, high, 
+            "SHORT\nSize: $" + str.tostring(positionSize, "#.##") + 
+            "\nCosts: $" + str.tostring(totalCosts, "#.##"), 
+            color=labelColor, style=label.style_label_down, textcolor=color.white)
+    
+    if showCosts
+        label.new(bar_index, low, 
+            "Costs:\nCommission: $" + str.tostring(commission, "#.##") + 
+            "\nSpread: $" + str.tostring(spreadCost, "#.##") + 
+            "\nSwap: $" + str.tostring(swapCost, "#.##") + 
+            "\nSlippage: $" + str.tostring(slippageCost, "#.##"), 
+            color=costColor, style=label.style_label_up, textcolor=color.white)
+
+// ============================================================================
+// PLOT OUTPUTS
+// ============================================================================
+
+// Plot current position size as a line
+var float currentPositionSize = 0.0
+if longCondition or shortCondition
+    currentPositionSize := positionSize
+
+plot(currentPositionSize, "Position Size ($)", color=color.blue, linewidth=2)
+
+// Plot cost components
+plot(totalCosts, "Total Costs ($)", color=color.red, linewidth=1)
+plot(commission, "Commission ($)", color=color.orange, linewidth=1)
+plot(spreadCost, "Spread Cost ($)", color=color.purple, linewidth=1)
+
+// ============================================================================
+// TABLE DISPLAY
+// ============================================================================
+
+if barstate.islast
+    var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.white, border_width=1)
+    
+    table.cell(infoTable, 0, 0, "Account Balance", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 0, "$" + str.tostring(accountBalance, "#,##0"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 1, "Current Node", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 1, currentNode, text_color=color.black)
+    
+    table.cell(infoTable, 0, 2, "Base Position %", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 2, str.tostring(getPositionSize(currentNode), "#.##") + "%", text_color=color.black)
+    
+    table.cell(infoTable, 0, 3, "Max Risk Amount", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 3, "$" + str.tostring(maxRiskAmount, "#,##0"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 4, "Commission Rate", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 4, str.tostring(commissionRate * 100, "#.####") + "%", text_color=color.black)
+    
+    table.cell(infoTable, 0, 5, "Spread", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 5, str.tostring(spreadPips, "#.#") + " pips", text_color=color.black)
+    
+    table.cell(infoTable, 0, 6, "Swap Rate", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 6, str.tostring(swapRate * 100, "#.####") + "%", text_color=color.black)
+    
+    table.cell(infoTable, 0, 7, "Cost Adjustment", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 7, enableCostAdjustment ? "Enabled" : "Disabled", text_color=color.black) 

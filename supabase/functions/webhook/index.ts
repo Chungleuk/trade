@@ -566,7 +566,7 @@ Deno.serve(async (req: Request) => {
         target: parsedAlert.target || null,
         stop: parsedAlert.stop || null,
         rr: parsedAlert.rr || null,
-        risk: '0.65%'.replace('%',''),
+        risk: riskPercent,
         alert_id: parsedAlert.id || generateAlertId(),
         message: parsedAlert.rawMessage || JSON.stringify(alertData),
         status: "active",
@@ -598,7 +598,7 @@ Deno.serve(async (req: Request) => {
         stop: parsedAlert.stop,
         rr: parsedAlert.rr,
         timeframe: parsedAlert.timeframe || "15",
-        risk: '0.65%',
+        risk: `${riskPercent}%`,
         rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
       });
       immediateEmailSent = true;
@@ -615,7 +615,7 @@ Deno.serve(async (req: Request) => {
           stop: parsedAlert.stop,
           rr: parsedAlert.rr,
           timeframe: parsedAlert.timeframe || "15",
-          risk: '0.65%',
+          risk: `${riskPercent}%`,
           rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
         });
         immediateEmailSent = true;
@@ -639,7 +639,7 @@ Deno.serve(async (req: Request) => {
           target: parsedAlert.target,
           stop: parsedAlert.stop,
           rr: parsedAlert.rr,
-          risk: '0.65%',
+          risk: `${riskPercent}%`,
           timestamp: data.created_at
         });
 
@@ -669,7 +669,7 @@ Deno.serve(async (req: Request) => {
               stop: parsedAlert.stop,
               rr: parsedAlert.rr,
               timeframe: parsedAlert.timeframe || "15",
-              risk: '0.65%',
+              risk: `${riskPercent}%`,
               rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData),
               aiAnalysis: analysisResult
             });

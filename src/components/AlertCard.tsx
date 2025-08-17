@@ -155,6 +155,26 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
             <span>{time}</span>
           </div>
           
+          {/* Direct Outcome Buttons */}
+          {onMarkOutcome && !alert.outcome && (
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={() => onMarkOutcome(alert.id, 'win')}
+                className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-green-600 bg-green-50 hover:bg-green-100 rounded-lg transition-colors border border-green-200"
+              >
+                <Trophy className="w-4 h-4" />
+                Mark as Win
+              </button>
+              <button
+                onClick={() => onMarkOutcome(alert.id, 'loss')}
+                className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors border border-red-200"
+              >
+                <LossIcon className="w-4 h-4" />
+                Mark as Loss
+              </button>
+            </div>
+          )}
+          
           {(onUpdateStatus || onDelete) && (
             <div className="relative">
               <button

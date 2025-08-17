@@ -6,6 +6,24 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Trading Backend API is running!',
+    endpoints: {
+      status: '/status',
+      health: '/health',
+      mt5_connect: '/mt5/connect',
+      mt5_heartbeat: '/mt5/heartbeat',
+      mt5_disconnect: '/mt5/disconnect',
+      signals_pending: '/signals/pending',
+      signals_ack: '/signals/ack'
+    },
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
+  });
+});
+
 // Test endpoint
 app.get('/status', (req, res) => {
   res.json({ 

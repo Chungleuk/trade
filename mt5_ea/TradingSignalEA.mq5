@@ -9,7 +9,7 @@
 #property description "Expert Advisor for receiving and executing trading signals via HTTP"
 
 //--- Input parameters
-input string   ServerURL = "http://localhost:3001";  // Server URL
+input string   ServerURL = "https://trading-backend-4v0f.onrender.com";  // Server URL (Render backend)
 input double   RiskPercent = 1.0;                    // Risk percentage per trade
 input bool     AutoExecute = true;                   // Auto-execute trades
 input bool     UseStopLoss = true;                   // Use stop loss
@@ -120,6 +120,14 @@ public:
 };
 
 SignalQueue signalQueue;
+
+//--- Trade management variables
+datetime lastTradeCheck = 0;
+int tradeCheckInterval = 60; // seconds
+datetime lastHKTimeCheck = 0;
+int hkTimeCheckInterval = 300; // 5 minutes
+bool autoShutdownEnabled = true;
+int hkShutdownHour = 3; // 3:00 AM Hong Kong time
 
 //--- Error handling class
 class ErrorHandler {
@@ -238,20 +246,21 @@ int OnInit() {
    // Set initial connection state
    connectionManager.SetState(CONNECTING);
    
-   // Test HTTP connection
+   // Test HTTP connection (more forgiving for testing)
    if(!TestConnection()) {
+      Print("TradingSignalEA: Warning - Failed to connect to server. Will retry on timer.");
       connectionManager.SetState(DISCONNECTED);
-      Print("TradingSignalEA: Failed to connect to server. Check 'Allow WebRequest' in Tools > Options > Expert Advisors");
-      return INIT_FAILED;
-   }
-   
-   // Send connection message
-   if(SendConnectionMessage()) {
-      connectionManager.SetState(CONNECTED);
-      lastSuccessfulPoll = TimeLocal();
+      // Don't fail initialization - let it retry
    } else {
-      connectionManager.SetState(DISCONNECTED);
-      return INIT_FAILED;
+      // Send connection message
+      if(SendConnectionMessage()) {
+         connectionManager.SetState(CONNECTED);
+         lastSuccessfulPoll = TimeLocal();
+         Print("TradingSignalEA: Connected to server successfully");
+      } else {
+         connectionManager.SetState(DISCONNECTED);
+         Print("TradingSignalEA: Warning - Failed to send connection message. Will retry on timer.");
+      }
    }
    
    // Start polling timer
@@ -322,6 +331,21 @@ void OnTimer() {
    // Process queued signals
    if(signalQueue.GetQueueSize() > 0) {
       signalQueue.ProcessNextSignal();
+   }
+   
+   // Check trade outcomes and update backend
+   if(TimeLocal() - lastTradeCheck >= tradeCheckInterval) {
+      CheckAndUpdateTradeOutcomes();
+      lastTradeCheck = TimeLocal();
+   }
+   
+   // Check Hong Kong time for auto-shutdown
+   if(TimeLocal() - lastHKTimeCheck >= hkTimeCheckInterval) {
+      if(IsHKShutdownTime()) {
+         Print("TradingSignalEA: Hong Kong shutdown time detected - closing all trades");
+         AutoCloseAllTrades();
+      }
+      lastHKTimeCheck = TimeLocal();
    }
 }
 
@@ -419,6 +443,86 @@ string IntegerToHexString(int value) {
 }
 
 //+------------------------------------------------------------------+
+//| Update trade outcome to backend                                 |
+//+------------------------------------------------------------------+
+bool UpdateTradeOutcome(ulong ticket, string outcome) {
+   string postData = StringFormat("{\"ticket\":%d,\"outcome\":\"%s\",\"symbol\":\"%s\",\"closePrice\":%.5f,\"closeTime\":\"%s\"}", 
+                                 ticket, outcome, Symbol(), SymbolInfoDouble(Symbol(), SYMBOL_BID), TimeToString(TimeLocal()));
+   
+   uchar data[], response[];
+   string headers = "Content-Type: application/json\r\n";
+   string responseHeaders;
+   
+   StringToCharArray(postData, data);
+   
+   int result = WebRequest("POST", ServerURL + "/mt5/trade-outcome", headers, 10000, data, response, responseHeaders);
+   
+   if(result == 200) {
+      Print("TradingSignalEA: Trade outcome updated successfully - Ticket: ", ticket, ", Outcome: ", outcome);
+      return true;
+   } else {
+      Print("TradingSignalEA: Failed to update trade outcome - Ticket: ", ticket, ", Error: ", result);
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check Hong Kong time for auto-shutdown                          |
+//+------------------------------------------------------------------+
+bool IsHKShutdownTime() {
+   // Hong Kong time is UTC+8
+   datetime utcTime = TimeGMT();
+   datetime hkTime = utcTime + 8 * 3600; // Add 8 hours for HK time
+   
+   MqlDateTime hkDateTime;
+   TimeToStruct(hkTime, hkDateTime);
+   
+   // Check if it's 3:00 AM Hong Kong time
+   return (hkDateTime.hour == hkShutdownHour && hkDateTime.min < 5); // Within 5 minutes of 3:00 AM
+}
+
+//+------------------------------------------------------------------+
+//| Auto-close all trades at HK shutdown time                       |
+//+------------------------------------------------------------------+
+void AutoCloseAllTrades() {
+   if(!autoShutdownEnabled) return;
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket)) {
+         if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+            string symbol = PositionGetString(POSITION_SYMBOL);
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            
+            // Close the position
+            MqlTradeRequest request = {};
+            MqlTradeResult result = {};
+            
+            request.action = TRADE_ACTION_DEAL;
+            request.position = ticket;
+            request.symbol = symbol;
+            request.volume = PositionGetDouble(POSITION_VOLUME);
+            request.type = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+            request.price = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_BID) : SymbolInfoDouble(symbol, SYMBOL_ASK);
+            request.deviation = 5;
+            request.magic = MagicNumber;
+            request.comment = "Auto-close at HK shutdown time";
+            
+            if(OrderSend(request, result)) {
+               if(result.retcode == TRADE_RETCODE_DONE) {
+                  Print("TradingSignalEA: Auto-closed trade at HK shutdown time - Ticket: ", ticket, ", Symbol: ", symbol);
+                  // Update outcome as loss
+                  UpdateTradeOutcome(ticket, "loss");
+               } else {
+                  Print("TradingSignalEA: Failed to auto-close trade - Ticket: ", ticket, ", Error: ", result.retcode);
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Simple string hash function                                     |
 //+------------------------------------------------------------------+
 int StringHash(string str) {
@@ -426,7 +530,7 @@ int StringHash(string str) {
    int len = StringLen(str);
    
    for(int i = 0; i < len; i++) {
-      hash = ((hash << 5) - hash + StringGetCharacter(str, i)) & 0xFFFFFFFF;
+      hash = ((hash << 5) - hash + StringGetCharacter(str, i)) & 0x7FFFFFFF;
    }
    
    return MathAbs(hash);
@@ -552,11 +656,13 @@ string ExtractJsonValue(const string json, const string key) {
          ushort ch = StringGetCharacter(json, valueEnd);
          if(ch == ',' || ch == '}' || ch == ']' || ch == ' ' || ch == '\t' || ch == '\n') break;
          valueEnd++;
-      }
-      return StringSubstr(json, valueStart, valueEnd - valueStart);
+       }
+       return StringSubstr(json, valueStart, valueEnd - valueStart);
    }
    return "";
 }
+
+
 
 //+------------------------------------------------------------------+
 //| Process trading signal                                           |
@@ -791,6 +897,61 @@ void SendSignalAck(const string signalId, const string status, const string mess
       Print("TradingSignalEA: Signal acknowledgment failed. HTTP code: ", result);
       ErrorHandler::HandleWebRequestError(result, "Signal Acknowledgment");
    }
+}
+
+//+------------------------------------------------------------------+
+//| Check and update trade outcomes                                  |
+//+------------------------------------------------------------------+
+void CheckAndUpdateTradeOutcomes() {
+   // Check closed trades for outcomes
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket > 0) {
+         if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == MagicNumber) {
+            // Check if this is a close deal (not an open deal)
+            ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+            if(dealType == DEAL_TYPE_SELL || dealType == DEAL_TYPE_BUY) {
+               // Find the corresponding position ticket
+               ulong positionTicket = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+               
+               // Check if we already processed this trade
+               if(!IsTradeOutcomeProcessed(positionTicket)) {
+                  // Calculate profit/loss
+                  double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+                  string outcome = (profit > 0) ? "win" : "loss";
+                  
+                  // Update backend with outcome
+                  if(UpdateTradeOutcome(positionTicket, outcome)) {
+                     MarkTradeOutcomeProcessed(positionTicket);
+                     Print("TradingSignalEA: Trade outcome updated - Ticket: ", positionTicket, ", Outcome: ", outcome, ", Profit: ", profit);
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if trade outcome was already processed                     |
+//+------------------------------------------------------------------+
+bool IsTradeOutcomeProcessed(ulong ticket) {
+   // Simple implementation - you can enhance this with file storage or global variables
+   static ulong processedTickets[];
+   for(int i = 0; i < ArraySize(processedTickets); i++) {
+      if(processedTickets[i] == ticket) return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Mark trade outcome as processed                                  |
+//+------------------------------------------------------------------+
+void MarkTradeOutcomeProcessed(ulong ticket) {
+   static ulong processedTickets[];
+   int size = ArraySize(processedTickets);
+   ArrayResize(processedTickets, size + 1);
+   processedTickets[size] = ticket;
 }
 
 //+------------------------------------------------------------------+

@@ -165,8 +165,9 @@ Sent from TradingView Alert Dashboard
 // AI Analysis function
 async function performAIAnalysis(alertData: any): Promise<any | null> {
   try {
-    const OPENAI_API_KEY = "2TtLh-jXUoZHhT1gRSNg1Tz0oVwJhf7gxAkwxCx_qm8";
-    const OPENAI_BASE_URL = "https://api.poe.com/v1";
+    // Use Poe.com API with Claude-3-Opus (same as your Python code)
+    const POE_API_KEY = Deno.env.get("POE_API_KEY") || "ljnJHoYE6g0Wc4HrhJFDjPRJWnYKw3_KgTjrwQjTznU";
+    const POE_BASE_URL = "https://api.poe.com/v1";
     
     const alertString = JSON.stringify(alertData, null, 2);
     
@@ -198,18 +199,18 @@ Please respond in the following JSON format:
   "recommendation": "strong_buy|buy|hold|sell|strong_sell"
 }`;
 
-    const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${POE_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENAI_API_KEY}`
+        'Authorization': `Bearer ${POE_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'Assistant',
+        model: 'claude-3-opus',  // Use Claude-3-Opus like your Python code
         messages: [
           {
             role: 'system',
-            content: 'You are a professional trading analyst. Provide clear, actionable analysis in the exact JSON format requested.'
+            content: 'You are a helpful financial and trading assistant. Analyze based on the provided chart data and trading signal.'
           },
           {
             role: 'user',
@@ -222,14 +223,14 @@ Please respond in the following JSON format:
     });
 
     if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.status}`);
+      throw new Error(`Poe.com API error: ${response.status}`);
     }
 
     const data = await response.json();
     const content = data.choices[0]?.message?.content;
     
     if (!content) {
-      throw new Error('No content received from OpenAI');
+      throw new Error('No content received from Poe.com API');
     }
 
     // Try to parse JSON response
@@ -242,7 +243,7 @@ Please respond in the following JSON format:
     }
 
   } catch (error) {
-    console.error('OpenAI API call failed:', error);
+    console.error('Poe.com API call failed:', error);
     return generateFallbackAnalysis(alertData);
   }
 }

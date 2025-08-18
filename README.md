@@ -74,10 +74,21 @@ curl -X POST http://localhost:3001/mt5/connect \
 
 ### Environment Variables
 Create a `.env` file based on `.env.example`:
+
 ```bash
+# Supabase Configuration
+SUPABASE_URL=https://xdjthqpnsyrlulqldlpi.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key_here
+
+# Server Configuration
 PORT=3001
 NODE_ENV=production
 ```
+
+**Important**: Replace `your_service_role_key_here` with your actual Supabase service role key from:
+1. Go to your Supabase project dashboard
+2. Settings → API
+3. Copy the "service_role" key (not the anon key)
 
 ## 📊 Monitoring
 

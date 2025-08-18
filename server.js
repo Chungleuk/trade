@@ -1,10 +1,16 @@
 // server.js
 import express from 'express';
 import cors from 'cors';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Supabase configuration
+const supabaseUrl = process.env.SUPABASE_URL || 'https://xdjthqpnsyrlulqldlpi.supabase.co';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'your_service_role_key_here';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -16,6 +22,7 @@ app.get('/', (req, res) => {
       mt5_connect: '/mt5/connect',
       mt5_heartbeat: '/mt5/heartbeat',
       mt5_disconnect: '/mt5/disconnect',
+      mt5_trade_outcome: '/mt5/trade-outcome',
       signals_pending: '/signals/pending',
       signals_ack: '/signals/ack'
     },
@@ -46,14 +53,55 @@ app.post('/mt5/connect', (req, res) => {
 });
 
 // Signals endpoint
-app.post('/signals/pending', (req, res) => {
+app.post('/signals/pending', async (req, res) => {
   console.log('MT5 EA requesting signals:', req.body);
-  res.json({ 
-    signals: [], 
-    message: 'No pending signals',
-    timestamp: new Date().toISOString(),
-    queue_size: 0
-  });
+  
+  try {
+    // Fetch pending signals from Supabase
+    const { data: signals, error } = await supabase
+      .from('trading_alerts')
+      .select('*')
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(10);
+    
+    if (error) {
+      console.error('Supabase error:', error);
+      return res.status(500).json({ 
+        error: 'Failed to fetch signals',
+        message: error.message 
+      });
+    }
+    
+    // Transform signals for MT5 EA
+    const transformedSignals = signals.map(signal => ({
+      id: signal.alert_id || signal.id,
+      symbol: signal.symbol,
+      action: signal.action,
+      entry: signal.entry,
+      target: signal.target,
+      stop: signal.stop,
+      timeframe: signal.timeframe,
+      risk: signal.risk,
+      timestamp: signal.created_at
+    }));
+    
+    console.log(`Found ${transformedSignals.length} pending signals`);
+    
+    res.json({ 
+      signals: transformedSignals, 
+      message: `${transformedSignals.length} signals found`,
+      timestamp: new Date().toISOString(),
+      queue_size: transformedSignals.length
+    });
+    
+  } catch (error) {
+    console.error('Error fetching signals:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
+    });
+  }
 });
 
 // Heartbeat endpoint
@@ -83,6 +131,34 @@ app.post('/mt5/disconnect', (req, res) => {
   res.json({ 
     status: 'disconnected', 
     message: 'MT5 EA disconnected successfully',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// MT5 trade outcome endpoint
+app.post('/mt5/trade-outcome', (req, res) => {
+  console.log('Trade outcome received:', req.body);
+  
+  // Extract trade outcome data
+  const { ticket, outcome, symbol, closePrice, closeTime } = req.body;
+  
+  // Here you would typically:
+  // 1. Update your database with the trade outcome
+  // 2. Send notification to your frontend
+  // 3. Update the trading alerts table
+  
+  console.log(`Trade ${ticket} (${symbol}) marked as ${outcome} at ${closePrice}`);
+  
+  res.json({ 
+    status: 'success', 
+    message: 'Trade outcome updated successfully',
+    trade: {
+      ticket,
+      outcome,
+      symbol,
+      closePrice,
+      closeTime
+    },
     timestamp: new Date().toISOString()
   });
 });

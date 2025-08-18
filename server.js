@@ -86,13 +86,26 @@ app.post('/signals/pending', async (req, res) => {
       timestamp: signal.created_at
     }));
     
-    console.log(`Found ${transformedSignals.length} pending signals`);
+    // Filter out duplicate signal IDs (keep only the most recent)
+    const uniqueSignals = [];
+    const seenIds = new Set();
+    
+    for (const signal of transformedSignals) {
+      if (!seenIds.has(signal.id)) {
+        seenIds.add(signal.id);
+        uniqueSignals.push(signal);
+      } else {
+        console.log(`Filtered duplicate signal ID: ${signal.id}`);
+      }
+    }
+    
+    console.log(`Found ${transformedSignals.length} total signals, ${uniqueSignals.length} unique signals`);
     
     res.json({ 
-      signals: transformedSignals, 
-      message: `${transformedSignals.length} signals found`,
+      signals: uniqueSignals, 
+      message: `${uniqueSignals.length} unique signals found`,
       timestamp: new Date().toISOString(),
-      queue_size: transformedSignals.length
+      queue_size: uniqueSignals.length
     });
     
   } catch (error) {

@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { TradingAnalytics, SymbolPerformance, MonthlyPerformance, RiskProgression, AnalyticsFilters } from '../types/analytics';
 import { TradingAlert } from '../types/alert';
+import { getRiskPercentForNode } from './positionSizingService';
 
 export class AnalyticsService {
   static async getTradingAnalytics(filters?: AnalyticsFilters): Promise<TradingAnalytics> {
@@ -198,7 +199,7 @@ export class AnalyticsService {
         return {
           symbol: state.group_key, // Currency pair (e.g., USDJPY, XAUUSD)
           node: state.current_node, // Current decision tree node
-          risk: this.getRiskForNode(state.current_node), // Risk percentage for this node
+          risk: getRiskPercentForNode(state.current_node), // Risk percentage for this node (uses centralized function)
           tradesAtNode, // Number of completed trades at this node
           lastUpdated: state.updated_at
         };
@@ -207,16 +208,5 @@ export class AnalyticsService {
       console.error('Error calculating risk progression:', error);
       return [];
     }
-  }
-
-  private static getRiskForNode(node: string): number {
-    const riskMap: Record<string, number> = {
-      'Start': 0.65, '1-0': 0.58, '0-1': 0.73, '2-0': 0.44, '1-1': 0.73, '0-2': 0.73,
-      '3-0': 0.25, '2-1': 0.62, '1-2': 0.83, '0-3': 0.62, '4-0': 0.08, '3-1': 0.41,
-      '2-2': 0.83, '1-3': 0.83, '0-4': 0.41, '4-1': 0.17, '3-2': 0.66, '2-3': 0.99,
-      '1-4': 0.66, '0-5': 0.17, '4-2': 0.33, '3-3': 0.99, '2-4': 0.99, '1-5': 0.33,
-      '4-3': 0.66, '3-4': 1.33, '2-5': 0.66, '4-4': 1.33, '3-5': 1.33, '4-5': 2.65,
-    };
-    return riskMap[node] || 0.65;
   }
 }

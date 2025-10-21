@@ -18,13 +18,24 @@ input int      MagicNumber = 123456;                 // Magic number for trades
 input int      PollInterval = 5000;                  // Poll interval in milliseconds
 input string   APIKey = "";                          // API Key for authentication
 input string   SecretKey = "";                       // Secret for HMAC
+input bool     UseGETMethod = false;                 // Use GET instead of POST for signal polling
 
 //--- Global variables
 string lastSignalId = "";
 datetime lastPollTime = 0;
 datetime lastSuccessfulPoll = 0;
+datetime lastHeartbeat = 0;
 int consecutiveFailures = 0;
 int maxConsecutiveFailures = 5;
+
+//--- Signal tracking to prevent duplicates
+string processedSignals[];  // Array to store processed signal IDs
+int processedSignalsCount = 0;
+string currentlyProcessingSignal = ""; // Track signal currently being processed
+
+//--- Active positions tracking for smart polling
+string activeSymbols[];     // Array to store symbols with active trades
+int activeSymbolsCount = 0;
 
 //--- Connection state management
 enum ConnectionState {
@@ -243,28 +254,30 @@ ConnectionManager connectionManager;
 int OnInit() {
    Print("TradingSignalEA: Initializing...");
    
-   // Set initial connection state
-   connectionManager.SetState(CONNECTING);
+   // Set initial connection state to CONNECTED for testing
+   connectionManager.SetState(CONNECTED);
+   lastSuccessfulPoll = TimeLocal();
    
-   // Test HTTP connection (more forgiving for testing)
-   if(!TestConnection()) {
-      Print("TradingSignalEA: Warning - Failed to connect to server. Will retry on timer.");
-      connectionManager.SetState(DISCONNECTED);
-      // Don't fail initialization - let it retry
+   // Test HTTP connection but don't fail if it doesn't work
+   if(TestConnection()) {
+      Print("TradingSignalEA: Server connection test successful");
+      // Temporarily disable connection message to focus on polling
+      // if(SendConnectionMessage()) {
+      //    Print("TradingSignalEA: Connection message sent successfully");
+      // }
    } else {
-      // Send connection message
-      if(SendConnectionMessage()) {
-         connectionManager.SetState(CONNECTED);
-         lastSuccessfulPoll = TimeLocal();
-         Print("TradingSignalEA: Connected to server successfully");
-      } else {
-         connectionManager.SetState(DISCONNECTED);
-         Print("TradingSignalEA: Warning - Failed to send connection message. Will retry on timer.");
-      }
+      Print("TradingSignalEA: Warning - Server connection test failed. Will retry on timer.");
    }
    
-   // Start polling timer
-   EventSetMillisecondTimer(PollInterval);
+   // Start polling timer - use 1 second for faster response
+   EventSetMillisecondTimer(1000);
+   
+   // Initialize active symbols based on existing positions
+   UpdateActiveSymbols();
+   Print("TradingSignalEA: Found ", activeSymbolsCount, " symbols with active positions");
+   
+   // TEMP: Test signal processing by creating a test signal
+   // TestSignalProcessing();
    
    Print("TradingSignalEA: Initialized successfully. Connection state: ", connectionManager.GetStateString());
    return INIT_SUCCEEDED;
@@ -316,9 +329,36 @@ void OnTimer() {
       return;
    }
    
-   // Poll for new signals
+   // Poll for new signals (with smart polling optimization)
    if(TimeLocal() - lastPollTime >= PollInterval/1000) {
-      PollForSignals();
+      // Smart polling: Only poll for signals if we have capacity for new trades
+      bool shouldPoll = true;
+      
+      // Don't poll if currently processing a signal
+      if(currentlyProcessingSignal != "") {
+         Print("TradingSignalEA: Currently processing signal ", currentlyProcessingSignal, " - skipping poll");
+         shouldPoll = false;
+      }
+      
+      // Check if current chart symbol already has an active trade
+      if(IsSymbolActive(Symbol())) {
+         Print("TradingSignalEA: Current symbol ", Symbol(), " has active trade - skipping poll");
+         shouldPoll = false;
+      }
+      
+      // Optional: Limit total number of concurrent trades
+      if(PositionsTotal() >= 5) { // Max 5 concurrent positions
+         Print("TradingSignalEA: Maximum concurrent positions reached - skipping poll");
+         shouldPoll = false;
+      }
+      
+      if(shouldPoll) {
+         if(UseGETMethod) {
+            PollForSignalsGET();
+         } else {
+            PollForSignals();
+         }
+      }
       lastPollTime = TimeLocal();
    }
    
@@ -336,6 +376,8 @@ void OnTimer() {
    // Check trade outcomes and update backend
    if(TimeLocal() - lastTradeCheck >= tradeCheckInterval) {
       CheckAndUpdateTradeOutcomes();
+      // Update active symbols list based on current positions
+      UpdateActiveSymbols();
       lastTradeCheck = TimeLocal();
    }
    
@@ -350,62 +392,238 @@ void OnTimer() {
 }
 
 //+------------------------------------------------------------------+
+//| Test signal processing (temporary function)                     |
+//+------------------------------------------------------------------+
+void TestSignalProcessing() {
+   Print("TradingSignalEA: Testing signal processing...");
+   
+   // Create the T271 XAUUSD signal that we just sent
+   TradingSignal testSignal;
+   testSignal.id = "T271";
+   testSignal.symbol = "XAUUSD";
+   testSignal.action = ORDER_TYPE_SELL;
+   testSignal.entry = 3335.595;
+   testSignal.target = 3329.5854;
+   testSignal.stop = 3341.6046;
+   testSignal.timeframe = 15;
+   testSignal.source = "TradingView";
+   testSignal.timestamp = TimeLocal();
+   
+   Print("TradingSignalEA: Created test signal: ", testSignal.id, " ", testSignal.symbol, " ", 
+         (testSignal.action == ORDER_TYPE_SELL ? "SELL" : "BUY"), " at ", testSignal.entry);
+   
+   // Test signal validation
+   if(ValidateSignal(testSignal)) {
+      Print("TradingSignalEA: Signal validation passed");
+      
+      // Test signal processing
+      if(ProcessSignal(testSignal)) {
+         Print("TradingSignalEA: Test signal processed successfully!");
+      } else {
+         Print("TradingSignalEA: Test signal processing failed");
+      }
+   } else {
+      Print("TradingSignalEA: Test signal validation failed");
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Test connection to server                                        |
 //+------------------------------------------------------------------+
 bool TestConnection() {
-   string headers = "Content-Type: application/json\r\n";
+   string headers = ""; // No Content-Type header for GET requests
    uchar postData[];
    uchar response[];
    string responseHeaders;
    
-   int result = WebRequest("GET", ServerURL + "/status", headers, 10000, postData, response, responseHeaders);
-   return (result == 200);
+   string testUrl = ServerURL + "/status";
+   Print("TradingSignalEA: Testing connection to: ", testUrl);
+   
+   int result = WebRequest("GET", testUrl, headers, 10000, postData, response, responseHeaders);
+   
+   if(result == 200) {
+      string responseStr = CharArrayToString(response);
+      Print("TradingSignalEA: Connection test successful. Response: ", responseStr);
+      return true;
+   } else {
+      Print("TradingSignalEA: Connection test failed. HTTP code: ", result);
+      if(ArraySize(response) > 0) {
+         string errorResponse = CharArrayToString(response);
+         Print("TradingSignalEA: Connection Test Error Response: ", errorResponse);
+      }
+      return false;
+   }
 }
 
 //+------------------------------------------------------------------+
 //| Poll for new signals                                            |
 //+------------------------------------------------------------------+
 void PollForSignals() {
-   if(!connectionManager.IsConnected()) {
-      Print("TradingSignalEA: Skipping signal poll - not connected");
-      return;
-   }
+   Print("TradingSignalEA: Polling for signals (POST method)...");
    
+   // 1. Get critical variables and validate them (log values for debugging)
+   long account = AccountInfoInteger(ACCOUNT_LOGIN);
+   string symbol = Symbol(); // Current chart symbol (e.g., XAUUSD)
+   int timeframe = Period(); // Current chart timeframe (e.g., 15 for M15)
+   
+   // Log raw values to confirm they're valid
+   Print("TradingSignalEA: Poll Variables - Account: ", account, ", Symbol: ", symbol, ", Timeframe: ", timeframe);
+   
+   // 2. Add fallbacks (in case variables are invalid)
+   if(symbol == "" || symbol == "unknown") symbol = "XAUUSD"; // Fallback to XAUUSD
+   if(timeframe <= 0) timeframe = 15; // Fallback to M15
+   
+   // 1. Build valid JSON body (use explicit UTF-8 encoding)
    string url = ServerURL + "/signals/pending";
-   string headers = GenerateHeaders();
-   string postDataStr = "{\"terminal\":\"" + TerminalInfoString(TERMINAL_NAME) + "\",\"account\":\"" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\"}";
+   string postDataStr = StringFormat(
+      "{\"terminal\":\"MT5\",\"account\":%d,\"symbol\":\"%s\",\"timeframe\":%d}",
+      (int)account,
+      symbol, // Remove EscapeJson (causes over-escaping)
+      timeframe
+   );
    
-   // Convert string to uchar array
+   // 2. Generate headers (now includes User-Agent, Accept, etc.)
+   string headers = GenerateHeaders("POST");
+   Print("TradingSignalEA: POST Headers:\n", headers);
+   Print("TradingSignalEA: POST Body: ", postDataStr);
+   
+   // 3. Convert JSON to UTF-8 uchar array (critical fix for hidden characters)
    uchar postData[];
-   StringToCharArray(postDataStr, postData);
+   int arraySize = StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
+   Print("TradingSignalEA: POST Body Size: ", arraySize, " bytes");
    
+   // 4. Send WebRequest with UTF-8 encoding
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 10000, postData, response, responseHeaders);
    
+   // 5. Handle response (log full details)
    if(result == 200) {
-      string responseStr = CharArrayToString(response);
+      string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
+      Print("TradingSignalEA: Poll Success - Response: ", responseStr);
       ProcessSignalsResponse(responseStr);
       connectionManager.UpdateConnectionHealth(true);
    } else {
-      Print("TradingSignalEA: Failed to poll for signals. HTTP code: ", result);
+      Print("TradingSignalEA: Poll Failed - HTTP Code: ", result);
+      if(ArraySize(response) > 0) {
+         string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
+         Print("TradingSignalEA: Poll Error Response: ", errorResponse);
+      }
       connectionManager.UpdateConnectionHealth(false);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Alternative polling method using GET (for testing)              |
+//+------------------------------------------------------------------+
+void PollForSignalsGET() {
+   Print("TradingSignalEA: Polling for signals (GET method)...");
+   
+   // 1. Prepare URL-encoded query parameters
+   string account = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
+   string symbol = UrlEncode(Symbol());
+   string timeframe = IntegerToString(Period());
+   
+   // 2. Build simple query string that backend expects
+   string queryString = "terminal=MT5&account=" + account;
+   
+   // 3. Build full URL
+   string url = ServerURL + "/signals/pending?" + queryString;
+   
+   // 4. Generate headers (pass "GET" method)
+   string headers = GenerateHeaders("GET");
+   if(headers == "") {
+      Print("TradingSignalEA: GET poll request aborted (invalid headers)");
+      return;
+   }
+   
+   // 5. Log request details for debugging
+   Print("TradingSignalEA: GET Poll URL: ", url);
+   Print("TradingSignalEA: GET Poll Headers: ", headers);
+   
+   // 6. Send GET request
+   uchar emptyData[];
+   uchar response[];
+   string responseHeaders;
+   int result = WebRequest("GET", url, headers, 10000, emptyData, response, responseHeaders);
+   
+   // 7. Handle response with detailed logging
+   if(result == 200) {
+      string responseStr = CharArrayToString(response);
+      Print("TradingSignalEA: Received response (GET): ", responseStr);
+      ProcessSignalsResponse(responseStr);
+      connectionManager.UpdateConnectionHealth(true);
+   } else {
+      Print("TradingSignalEA: Failed to poll for signals (GET). HTTP code: ", result);
+      // Log server's error response for debugging
+      if(ArraySize(response) > 0) {
+         string errorResponse = CharArrayToString(response);
+         Print("TradingSignalEA: GET Error Response: ", errorResponse);
+      }
+      connectionManager.UpdateConnectionHealth(false);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| URL-encode a string (required for GET query parameters)         |
+//+------------------------------------------------------------------+
+string UrlEncode(string str) {
+   string encoded = "";
+   string hexChars = "0123456789ABCDEF";
+   
+   for(int i = 0; i < StringLen(str); i++) {
+      ushort ch = StringGetCharacter(str, i);
       
-      if(ErrorHandler::HandleWebRequestError(result, "Signal Poll")) {
-         // Add to retry queue or handle retry logic
-         Print("TradingSignalEA: Will retry signal poll on next timer");
+      // Keep safe characters (A-Z, a-z, 0-9, -, _, ., ~) as-is
+      if((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+         ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+         encoded += ShortToString(ch);
+      } else {
+         // Encode special characters (e.g., space → %20)
+         encoded += "%" + StringSubstr(hexChars, ch >> 4, 1) + StringSubstr(hexChars, ch & 0x0F, 1);
       }
    }
+   
+   return encoded;
+}
+
+//+------------------------------------------------------------------+
+//| Escape JSON string to prevent malformed JSON                    |
+//+------------------------------------------------------------------+
+string EscapeJson(string str) {
+   // MQL5 StringReplace parameters: (string, string, string)
+   StringReplace(str, "\\", "\\\\");  // Escape backslashes first
+   StringReplace(str, "\"", "\\\"");  // Escape quotes
+   StringReplace(str, "\n", "\\n");   // Escape newlines
+   StringReplace(str, "\r", "\\r");   // Escape carriage returns
+   StringReplace(str, "\t", "\\t");   // Escape tabs
+   return str;
 }
 
 //+------------------------------------------------------------------+
 //| Generate authentication headers                                  |
 //+------------------------------------------------------------------+
-string GenerateHeaders() {
-   string headers = "Content-Type: application/json\r\n";
+// Generate headers with all required headers for Render backend
+string GenerateHeaders(string httpMethod = "POST") {
+   string headers = "";
    
+   // 1. Required for all requests: Identify the client (MT5 EA)
+   headers += "User-Agent: MT5-TradingSignalEA/1.00\r\n";
+   
+   // 2. Required for JSON APIs: Indicate acceptance of JSON responses
+   headers += "Accept: application/json\r\n";
+   
+   // 3. Required for POST requests: Specify JSON body format
+   if(httpMethod == "POST") {
+      headers += "Content-Type: application/json\r\n";
+   }
+   
+   // 4. Optional: Add CORS-compatible origin (fixes potential cross-origin issues)
+   headers += "Origin: https://trading-backend-4v0f.onrender.com\r\n";
+   
+   // 5. Add authentication headers (if APIKey/SecretKey are set)
    if(APIKey != "" && SecretKey != "") {
-      string timestamp = IntegerToString(TimeLocal());
+      string timestamp = IntegerToString(TimeGMT() * 1000); // Use milliseconds
       string signature = GenerateHMAC(APIKey + timestamp, SecretKey);
       
       headers += "X-API-Key: " + APIKey + "\r\n";
@@ -420,9 +638,17 @@ string GenerateHeaders() {
 //| Generate HMAC signature                                         |
 //+------------------------------------------------------------------+
 string GenerateHMAC(string data, string key) {
-   // Simple hash for MQL5 (in production, use proper HMAC)
-   string combined = data + key;
-   return IntegerToHexString(StringHash(combined));
+   // MQL5 doesn't have CryptoHMAC, use enhanced hash for now
+   // In production, consider using external crypto library or server-side validation
+   string combined = data + key + "MT5EA";
+   int hash1 = StringHash(combined);
+   int hash2 = StringHash(key + data);
+   
+   // Combine hashes and convert to hex for better distribution
+   long combinedHash = ((long)hash1 << 16) ^ hash2;
+   if(combinedHash < 0) combinedHash = -combinedHash;
+   
+   return StringFormat("%016X", combinedHash);
 }
 
 //+------------------------------------------------------------------+
@@ -547,8 +773,36 @@ void ProcessSignalsResponse(const string response) {
       if(signalData != "") {
          TradingSignal signal;
          if(ParseSignalData(signalData, signal)) {
+            // Check for duplicate signal (multiple checks for safety)
+            if(IsSignalAlreadyProcessed(signal.id)) {
+               Print("TradingSignalEA: Duplicate signal detected: ", signal.id, " - skipping");
+               return;
+            }
+            
+            // Check if signal is currently being processed
+            if(currentlyProcessingSignal == signal.id) {
+               Print("TradingSignalEA: Signal ", signal.id, " is currently being processed - skipping");
+               return;
+            }
+            
+            // Check if position already exists for this symbol
+            if(HasOpenPosition(signal.symbol)) {
+               Print("TradingSignalEA: Position already exists for ", signal.symbol, " - skipping signal: ", signal.id);
+               return;
+            }
+            
+            // Check if symbol is already active (optimization)
+            if(IsSymbolActive(signal.symbol)) {
+               Print("TradingSignalEA: Symbol ", signal.symbol, " already has active trade - skipping signal: ", signal.id);
+               return;
+            }
+            
             if(signal.id != "" && signal.id != lastSignalId) {
                lastSignalId = signal.id;
+               // Set currently processing flag
+               currentlyProcessingSignal = signal.id;
+               // CRITICAL: Mark signal as processed IMMEDIATELY to prevent duplicates
+               MarkSignalAsProcessed(signal.id);
                // Add to queue instead of processing immediately
                signalQueue.AddSignal(signal);
                Print("TradingSignalEA: Signal queued: ", signal.id, " for ", signal.symbol);
@@ -670,6 +924,13 @@ string ExtractJsonValue(const string json, const string key) {
 bool ProcessSignal(const TradingSignal& signal) {
    Print("TradingSignalEA: Processing signal: ", signal.id, " for ", signal.symbol);
    
+   // Final duplicate check before execution
+   if(IsSignalAlreadyProcessed(signal.id)) {
+      Print("TradingSignalEA: Signal ", signal.id, " already processed during execution - aborting");
+      currentlyProcessingSignal = ""; // Clear processing flag
+      return false;
+   }
+   
    // Validate signal
    if(!ValidateSignal(signal)) {
       Print("TradingSignalEA: Signal validation failed");
@@ -682,15 +943,20 @@ bool ProcessSignal(const TradingSignal& signal) {
       if(ExecuteTrade(signal)) {
          Print("TradingSignalEA: Trade executed successfully for signal: ", signal.id);
          SendSignalAck(signal.id, "executed", "Trade executed successfully");
+         // Add symbol to active list to optimize polling
+         AddActiveSymbol(signal.symbol);
+         currentlyProcessingSignal = ""; // Clear processing flag
          return true;
       } else {
          Print("TradingSignalEA: Trade execution failed for signal: ", signal.id);
          SendSignalAck(signal.id, "failed", "Trade execution failed");
+         currentlyProcessingSignal = ""; // Clear processing flag
          return false;
       }
    } else {
       Print("TradingSignalEA: Signal received (auto-execute disabled): ", signal.id);
       SendSignalAck(signal.id, "received", "Signal received, manual execution required");
+      currentlyProcessingSignal = ""; // Clear processing flag
       return true;
    }
 }
@@ -823,10 +1089,12 @@ double CalculateLotSize(const TradingSignal& signal) {
 //+------------------------------------------------------------------+
 bool SendConnectionMessage() {
    string url = ServerURL + "/mt5/connect";
-   string headers = GenerateHeaders();
-   string postDataStr = "{\"type\":\"mt5_connect\",\"account\":\"" + 
-                        IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\",\"terminal\":\"" + 
-                        TerminalInfoString(TERMINAL_NAME) + "\",\"version\":\"5.0\"}";
+   string postDataStr = StringFormat(
+      "{\"type\":\"mt5_connect\",\"account\":%d,\"terminal\":\"%s\",\"version\":\"5.0\"}",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      EscapeJson(TerminalInfoString(TERMINAL_NAME))
+   );
+   string headers = GenerateHeaders("POST");
    
    uchar postData[];
    StringToCharArray(postDataStr, postData);
@@ -847,9 +1115,11 @@ bool SendConnectionMessage() {
 
 void SendDisconnectMessage() {
    string url = ServerURL + "/mt5/disconnect";
-   string headers = GenerateHeaders();
-   string postDataStr = "{\"type\":\"mt5_disconnect\",\"account\":\"" + 
-                        IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\"}";
+   string postDataStr = StringFormat(
+      "{\"type\":\"mt5_disconnect\",\"account\":%d}",
+      AccountInfoInteger(ACCOUNT_LOGIN)
+   );
+   string headers = GenerateHeaders("POST");
    
    uchar postData[];
    StringToCharArray(postDataStr, postData);
@@ -861,41 +1131,65 @@ void SendDisconnectMessage() {
 
 void SendHeartbeat() {
    string url = ServerURL + "/mt5/heartbeat";
-   string headers = GenerateHeaders();
-   string postDataStr = "{\"type\":\"mt5_heartbeat\",\"account\":\"" + 
-                        IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\",\"timestamp\":\"" + 
-                        TimeToString(TimeLocal()) + "\",\"queue_size\":" + IntegerToString(signalQueue.GetQueueSize()) + "}";
+   string postDataStr = StringFormat(
+      "{\"terminal\":\"MT5\",\"account\":%d}",
+      (int)AccountInfoInteger(ACCOUNT_LOGIN)
+   );
+   string headers = GenerateHeaders("POST");
    
+   // Convert to UTF-8 uchar array
    uchar postData[];
-   StringToCharArray(postDataStr, postData);
+   StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
    
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
    
-   if(result != 200) {
+   if(result == 200) {
+      Print("TradingSignalEA: Heartbeat successful");
+      connectionManager.UpdateConnectionHealth(true);
+   } else {
       Print("TradingSignalEA: Heartbeat failed. HTTP code: ", result);
-      ErrorHandler::HandleWebRequestError(result, "Heartbeat");
+      if(ArraySize(response) > 0) {
+         string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
+         Print("TradingSignalEA: Heartbeat Error Response: ", errorResponse);
+      }
+      connectionManager.UpdateConnectionHealth(false);
    }
 }
 
 void SendSignalAck(const string signalId, const string status, const string message) {
+   Print("TradingSignalEA: Sending signal ack - ID: ", signalId, ", Status: ", status);
+   
    string url = ServerURL + "/signals/ack";
-   string headers = GenerateHeaders();
-   string postDataStr = "{\"type\":\"signal_ack\",\"signalId\":\"" + signalId + 
-                        "\",\"status\":\"" + status + "\",\"message\":\"" + message + 
-                        "\",\"account\":\"" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\"}";
+   string headers = GenerateHeaders("POST"); // Uses new headers (User-Agent, Accept, etc.)
    
+   // Build valid JSON (avoid over-escaping; use simple string formatting)
+   string postDataStr = StringFormat(
+      "{\"type\":\"signal_ack\",\"signalId\":\"%s\",\"status\":\"%s\",\"message\":\"%s\",\"account\":%d}",
+      signalId,
+      status,
+      message, // No need for EscapeJson (message has no special characters)
+      (int)AccountInfoInteger(ACCOUNT_LOGIN)
+   );
+   
+   // Convert to UTF-8 uchar array
    uchar postData[];
-   StringToCharArray(postDataStr, postData);
+   StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
    
+   // Send request
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
    
-   if(result != 200) {
-      Print("TradingSignalEA: Signal acknowledgment failed. HTTP code: ", result);
-      ErrorHandler::HandleWebRequestError(result, "Signal Acknowledgment");
+   if(result == 200) {
+      Print("TradingSignalEA: Signal ack sent successfully - ID: ", signalId);
+   } else {
+      Print("TradingSignalEA: Signal ack failed - HTTP Code: ", result);
+      if(ArraySize(response) > 0) {
+         string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
+         Print("TradingSignalEA: Ack Error Response: ", errorResponse);
+      }
    }
 }
 
@@ -928,6 +1222,118 @@ void CheckAndUpdateTradeOutcomes() {
                }
             }
          }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if signal was already processed                            |
+//+------------------------------------------------------------------+
+bool IsSignalAlreadyProcessed(const string& signalId) {
+   for(int i = 0; i < processedSignalsCount; i++) {
+      if(processedSignals[i] == signalId) {
+         Print("TradingSignalEA: Signal ", signalId, " already processed - skipping");
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Mark signal as processed                                         |
+//+------------------------------------------------------------------+
+void MarkSignalAsProcessed(const string& signalId) {
+   ArrayResize(processedSignals, processedSignalsCount + 1);
+   processedSignals[processedSignalsCount] = signalId;
+   processedSignalsCount++;
+   Print("TradingSignalEA: Signal ", signalId, " marked as processed (Total processed: ", processedSignalsCount, ")");
+   
+   // Clean up old signals if array gets too large (keep last 100)
+   if(processedSignalsCount > 100) {
+      // Remove oldest signals
+      for(int i = 0; i < 50; i++) {
+         processedSignals[i] = processedSignals[i + 50];
+      }
+      processedSignalsCount = 50;
+      ArrayResize(processedSignals, 50);
+      Print("TradingSignalEA: Cleaned up old processed signals");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if position already exists for this symbol                 |
+//+------------------------------------------------------------------+
+bool HasOpenPosition(const string& symbol) {
+   for(int i = 0; i < PositionsTotal(); i++) {
+      if(PositionGetSymbol(i) == symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+         Print("TradingSignalEA: Position already exists for ", symbol, " - skipping");
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Add symbol to active symbols list                               |
+//+------------------------------------------------------------------+
+void AddActiveSymbol(const string& symbol) {
+   // Check if symbol already exists
+   for(int i = 0; i < activeSymbolsCount; i++) {
+      if(activeSymbols[i] == symbol) {
+         return; // Already exists
+      }
+   }
+   
+   // Add new symbol
+   ArrayResize(activeSymbols, activeSymbolsCount + 1);
+   activeSymbols[activeSymbolsCount] = symbol;
+   activeSymbolsCount++;
+   Print("TradingSignalEA: Added ", symbol, " to active symbols list");
+}
+
+//+------------------------------------------------------------------+
+//| Remove symbol from active symbols list                          |
+//+------------------------------------------------------------------+
+void RemoveActiveSymbol(const string& symbol) {
+   for(int i = 0; i < activeSymbolsCount; i++) {
+      if(activeSymbols[i] == symbol) {
+         // Shift array elements
+         for(int j = i; j < activeSymbolsCount - 1; j++) {
+            activeSymbols[j] = activeSymbols[j + 1];
+         }
+         activeSymbolsCount--;
+         ArrayResize(activeSymbols, activeSymbolsCount);
+         Print("TradingSignalEA: Removed ", symbol, " from active symbols list");
+         return;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if symbol has active trade                                |
+//+------------------------------------------------------------------+
+bool IsSymbolActive(const string& symbol) {
+   for(int i = 0; i < activeSymbolsCount; i++) {
+      if(activeSymbols[i] == symbol) {
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Update active symbols based on current positions                |
+//+------------------------------------------------------------------+
+void UpdateActiveSymbols() {
+   // Clear current list
+   activeSymbolsCount = 0;
+   ArrayResize(activeSymbols, 0);
+   
+   // Add symbols with open positions
+   for(int i = 0; i < PositionsTotal(); i++) {
+      if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+         string symbol = PositionGetSymbol(i);
+         AddActiveSymbol(symbol);
       }
    }
 }

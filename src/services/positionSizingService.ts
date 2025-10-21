@@ -74,6 +74,16 @@ export function advanceNode(currentNode: string, outcome: Outcome): string {
   const wins = parseInt(match[1], 10);
   const losses = parseInt(match[2], 10);
 
+  // Calculate new wins/losses based on outcome
+  const newWins = outcome === 'win' ? wins + 1 : wins;
+  const newLosses = outcome === 'loss' ? losses + 1 : losses;
+  
+  // RESET TO START if we exceed the defined decision tree limits (max 4 wins or 5 losses)
+  if (newWins > 4 || newLosses > 5) {
+    console.log(`[Position Sizing] Decision tree limit reached at ${wins}-${losses}, resetting to Start (0.65% risk)`);
+    return 'Start';  // Reset to beginning
+  }
+
   if (outcome === 'win') return `${wins + 1}-${losses}`;
   if (outcome === 'loss') return `${wins}-${losses + 1}`;
   return currentNode; // breakeven keeps same node by default

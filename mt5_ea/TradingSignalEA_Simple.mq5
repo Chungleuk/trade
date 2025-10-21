@@ -6,33 +6,21 @@
 #property copyright "Copyright 2024, Your Company"
 #property link      "https://www.yourcompany.com"
 #property version   "1.00"
-#property description "Simple Expert Advisor for testing basic functionality"
+#property description "Ultra simple test EA"
 
 //--- Input parameters
-input string   ServerURL = "https://trading-backend-4v0f.onrender.com";  // Server URL
-input int      MagicNumber = 123456;                 // Magic number for trades
-input int      PollInterval = 5000;                  // Poll interval in milliseconds
-
-//--- Global variables
-datetime lastPollTime = 0;
-bool isConnected = false;
+input string   TestMessage = "Hello World";  // Test message
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("TradingSignalEA: Initializing...");
-   
-   // Test basic connection
-   if(!TestConnection()) {
-      Print("TradingSignalEA: Failed to connect to server. Check 'Allow WebRequest' in Tools > Options > Expert Advisors");
-      return INIT_FAILED;
-   }
-   
-   // Start polling timer
-   EventSetMillisecondTimer(PollInterval);
-   
-   Print("TradingSignalEA: Initialized successfully");
+   Print("=== ULTRA SIMPLE EA STARTING ===");
+   Print("Test Message: ", TestMessage);
+   Print("Current Time: ", TimeToString(TimeLocal()));
+   Print("Symbol: ", Symbol());
+   Print("Timeframe: ", EnumToString(Period()));
+   Print("=== ULTRA SIMPLE EA READY ===");
    return INIT_SUCCEEDED;
 }
 
@@ -40,55 +28,17 @@ int OnInit() {
 //| Expert deinitialization function                                 |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
-   Print("TradingSignalEA: Deinitializing...");
-   
-   // Stop timer
-   EventKillTimer();
-   
-   Print("TradingSignalEA: Deinitialized");
+   Print("Ultra Simple EA: Deinitializing...");
 }
 
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick() {
-   // This function is called on every tick
-   // We'll use timer for polling instead
-}
-
-//+------------------------------------------------------------------+
-//| Timer function                                                   |
-//+------------------------------------------------------------------+
-void OnTimer() {
-   // Simple polling every 5 seconds
-   if(TimeLocal() - lastPollTime >= PollInterval/1000) {
-      Print("TradingSignalEA: Timer tick - checking connection");
-      TestConnection();
-      lastPollTime = TimeLocal();
+   static datetime lastTickTime = 0;
+   if(TimeLocal() - lastTickTime >= 3) { // Every 3 seconds
+      Print("Ultra Simple EA: Tick received at ", TimeToString(TimeLocal()));
+      lastTickTime = TimeLocal();
    }
 }
-
-//+------------------------------------------------------------------+
-//| Test connection to server                                        |
-//+------------------------------------------------------------------+
-bool TestConnection() {
-   string headers = "Content-Type: application/json\r\n";
-   uchar postData[];
-   uchar response[];
-   string responseHeaders;
-   
-   int result = WebRequest("GET", ServerURL + "/status", headers, 10000, postData, response, responseHeaders);
-   
-   if(result == 200) {
-      Print("TradingSignalEA: Connection test successful");
-      isConnected = true;
-      return true;
-   } else {
-      Print("TradingSignalEA: Connection test failed. HTTP code: ", result);
-      isConnected = false;
-      return false;
-   }
-}
-
-//+------------------------------------------------------------------+
 

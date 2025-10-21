@@ -1,43 +1,69 @@
 //+------------------------------------------------------------------+
-//|                                           TradingSignalEA.mq5 |
-//|                                  Copyright 2024, Your Company |
-//|                                             https://www.yourcompany.com |
+//| trading9.mq5 |
+//| Copyright 2025, Your Company |
+//| https://www.yourcompany.com |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2024, Your Company"
-#property link      "https://www.yourcompany.com"
-#property version   "1.00"
-#property description "Expert Advisor for receiving and executing trading signals via HTTP"
+#property copyright "Copyright 2025, Your Company"
+#property link "https://www.yourcompany.com"
+#property version "1.06"
+#property description "Expert Advisor with fixed JSON parsing and dynamic risk sizing"
 
 //--- Input parameters
-input string   ServerURL = "https://trading-backend-4v0f.onrender.com";  // Server URL (Render backend)
-input double   RiskPercent = 1.0;                    // Risk percentage per trade
-input bool     AutoExecute = true;                   // Auto-execute trades
-input bool     UseStopLoss = true;                   // Use stop loss
-input bool     UseTakeProfit = true;                 // Use take profit
-input int      MagicNumber = 123456;                 // Magic number for trades
-input int      PollInterval = 5000;                  // Poll interval in milliseconds
-input string   APIKey = "";                          // API Key for authentication
-input string   SecretKey = "";                       // Secret for HMAC
-input bool     UseGETMethod = false;                 // Use GET instead of POST for signal polling
+input string ServerURL = "https://trading-backend-4v0f.onrender.com";
+input double RiskPercent = 0.65;
+input bool AutoExecute = true;
+input bool UseStopLoss = true;
+input bool UseTakeProfit = true;
+input int MagicNumber = 123456;
+input int PollInterval = 1000;
+input string APIKey = "";
+input string SecretKey = "";
+input bool UseGETMethod = false;
+input int SignalExpirationMinutes = 5;
+input bool DebugMode = true;
+input int MaxTimeDriftMinutes = 60;
+input bool UseServerTimeForExpiration = true;
+input bool AutoShutdownEnabled = true;
+input int HKShutdownHour = 4;
+input int MaxRetryAttempts = 3;
+input int DuplicateCheckWindow = 300;
+input double BaseMaxSlippagePips = 3.0;
+input double VolatileSymbolSlippageMultiplier = 1.5;
+input bool AllowCriticalSignalOverride = true;
+input double CriticalSignalMaxExtraPips = 1.0;
+input bool UseDynamicContractSize = false;
+input double BaseAccountSize = 10000.0;
+input double MaxContractSizeMultiplier = 5.0;
+input int NetworkStabilizationDelay = 300;
 
 //--- Global variables
-string lastSignalId = "";
 datetime lastPollTime = 0;
 datetime lastSuccessfulPoll = 0;
 datetime lastHeartbeat = 0;
 int consecutiveFailures = 0;
-int maxConsecutiveFailures = 5;
+int maxConsecutiveFailures = 3;
+int tradeCheckInterval = 10;
+datetime lastTradeCheck = 0;
+int hkTimeCheckInterval = 300;
+datetime lastHKTimeCheck = 0;
+datetime lastNetworkIssue = 0;
 
-//--- Signal tracking to prevent duplicates
-string processedSignals[];  // Array to store processed signal IDs
+string processedSignals[];
 int processedSignalsCount = 0;
-string currentlyProcessingSignal = ""; // Track signal currently being processed
+string currentlyProcessingSignal = "";
+datetime signalProcessingStartTime = 0;
 
-//--- Active positions tracking for smart polling
-string activeSymbols[];     // Array to store symbols with active trades
+string activeSymbols[];
 int activeSymbolsCount = 0;
 
-//--- Connection state management
+struct SignalRetry {
+   string signalId;
+   int retryCount;
+   datetime lastRetryTime;
+};
+SignalRetry signalRetries[];
+int signalRetriesCount = 0;
+
 enum ConnectionState {
    DISCONNECTED,
    CONNECTING,
@@ -47,82 +73,99 @@ enum ConnectionState {
 
 ConnectionState connectionState = DISCONNECTED;
 
-//--- Signal structure
+enum ENUM_SIGNAL_ORDER_TYPE {
+   ORDER_TYPE_MARKET,
+   ORDER_TYPE_LIMIT,
+   ORDER_TYPE_STOP
+};
+
 struct TradingSignal {
    string id;
    string symbol;
    ENUM_ORDER_TYPE action;
+   ENUM_SIGNAL_ORDER_TYPE order_type;
    double entry;
    double target;
    double stop;
    int timeframe;
    string source;
    datetime timestamp;
-   
-   // Copy constructor to avoid deprecation warnings
+   datetime expire_time;
+   datetime receive_time;
+   double risk_percent;
+   bool is_critical;
+
    TradingSignal() {
       id = "";
       symbol = "";
       action = ORDER_TYPE_BUY;
+      order_type = ORDER_TYPE_MARKET;
       entry = 0.0;
       target = 0.0;
       stop = 0.0;
       timeframe = 15;
       source = "";
-      timestamp = TimeLocal();
+      timestamp = TimeGMT();
+      expire_time = timestamp + (5 * 60);
+      receive_time = TimeGMT();
+      risk_percent = 0.65;
+      is_critical = false;
    }
-   
+
    TradingSignal(const TradingSignal& other) {
       id = other.id;
       symbol = other.symbol;
       action = other.action;
+      order_type = other.order_type;
       entry = other.entry;
       target = other.target;
       stop = other.stop;
       timeframe = other.timeframe;
       source = other.source;
       timestamp = other.timestamp;
+      expire_time = other.expire_time;
+      receive_time = other.receive_time;
+      risk_percent = other.risk_percent;
+      is_critical = other.is_critical;
    }
 };
 
-//--- Signal queue for reliability
 class SignalQueue {
 private:
    TradingSignal signals[];
    int queueSize;
-   
+
 public:
    SignalQueue() {
       queueSize = 0;
       ArrayResize(signals, 0);
    }
-   
+
    void AddSignal(const TradingSignal& signal) {
       ArrayResize(signals, queueSize + 1);
-      signals[queueSize] = signal; // Now safe with copy constructor
+      signals[queueSize] = signal;
       queueSize++;
       Print("TradingSignalEA: Signal added to queue. Queue size: ", queueSize);
    }
-   
+
    bool ProcessNextSignal() {
       if(queueSize == 0) return false;
-      
-      TradingSignal signal = signals[0]; // Now safe with copy constructor
-      
-      // Remove processed signal from queue
+
+      TradingSignal signal = signals[0];
+
       for(int i = 0; i < queueSize - 1; i++) {
-         signals[i] = signals[i + 1]; // Now safe with copy constructor
+         signals[i] = signals[i + 1];
       }
       queueSize--;
       ArrayResize(signals, queueSize);
-      
+
       return ProcessSignal(signal);
    }
-   
+
    int GetQueueSize() const {
       return queueSize;
    }
-   
+
    void ClearQueue() {
       queueSize = 0;
       ArrayResize(signals, 0);
@@ -132,25 +175,16 @@ public:
 
 SignalQueue signalQueue;
 
-//--- Trade management variables
-datetime lastTradeCheck = 0;
-int tradeCheckInterval = 60; // seconds
-datetime lastHKTimeCheck = 0;
-int hkTimeCheckInterval = 300; // 5 minutes
-bool autoShutdownEnabled = true;
-int hkShutdownHour = 3; // 3:00 AM Hong Kong time
-
-//--- Error handling class
 class ErrorHandler {
 public:
    static bool HandleWebRequestError(int httpCode, string operation) {
       switch(httpCode) {
-         case -1: 
+         case -1:
             Print("TradingSignalEA: Network error in ", operation, " - check internet connection");
             return false;
          case 0:
             Print("TradingSignalEA: No response in ", operation, " - check server availability");
-            return true; // Retry-able
+            return true;
          case 401:
             Print("TradingSignalEA: Authentication failed in ", operation);
             return false;
@@ -162,60 +196,59 @@ public:
             return false;
          case 500:
             Print("TradingSignalEA: Server error in ", operation, " - will retry");
-            return true; // Retry-able
+            return true;
          case 502:
          case 503:
          case 504:
             Print("TradingSignalEA: Server unavailable in ", operation, " - will retry");
-            return true; // Retry-able
+            return true;
          default:
             Print("TradingSignalEA: HTTP error ", httpCode, " in ", operation);
-            return (httpCode >= 500); // Retry server errors
+            return (httpCode >= 500);
       }
    }
-   
+
    static void LogError(string operation, string details) {
       Print("TradingSignalEA: ERROR in ", operation, " - ", details);
    }
 };
 
-//--- Connection manager
 class ConnectionManager {
 private:
    ConnectionState state;
    datetime lastHeartbeat;
    int heartbeatInterval;
-   
+
 public:
    ConnectionManager() {
       state = DISCONNECTED;
       lastHeartbeat = 0;
-      heartbeatInterval = 30; // 30 seconds
+      heartbeatInterval = 15;
    }
-   
+
    void SetState(ConnectionState newState) {
       if(state != newState) {
          Print("TradingSignalEA: Connection state changed from ", EnumToString(state), " to ", EnumToString(newState));
          state = newState;
       }
    }
-   
+
    ConnectionState GetState() const {
       return state;
    }
-   
+
    bool IsConnected() const {
       return (state == CONNECTED);
    }
-   
+
    bool IsHealthy() const {
       return (state == CONNECTED && consecutiveFailures < maxConsecutiveFailures);
    }
-   
+
    void UpdateConnectionHealth(bool success) {
       if(success) {
          consecutiveFailures = 0;
-         lastSuccessfulPoll = TimeLocal();
+         lastSuccessfulPoll = TimeGMT();
          if(state == RECONNECTING) {
             SetState(CONNECTED);
          }
@@ -223,18 +256,20 @@ public:
          consecutiveFailures++;
          if(consecutiveFailures >= maxConsecutiveFailures && state == CONNECTED) {
             SetState(RECONNECTING);
+            lastNetworkIssue = TimeGMT();
+            Print("TradingSignalEA: Network health degraded - entering RECONNECTING state");
          }
       }
    }
-   
+
    bool ShouldSendHeartbeat() {
-      return (TimeLocal() - lastHeartbeat >= heartbeatInterval);
+      return (TimeGMT() - lastHeartbeat >= heartbeatInterval);
    }
-   
+
    void UpdateHeartbeat() {
-      lastHeartbeat = TimeLocal();
+      lastHeartbeat = TimeGMT();
    }
-   
+
    string GetStateString() const {
       switch(state) {
          case DISCONNECTED: return "Disconnected";
@@ -253,32 +288,24 @@ ConnectionManager connectionManager;
 //+------------------------------------------------------------------+
 int OnInit() {
    Print("TradingSignalEA: Initializing...");
-   
-   // Set initial connection state to CONNECTED for testing
+
+   if(!IsTradingEnabled()) {
+      Print("TradingSignalEA: FATAL - Trading is disabled. Fix settings and restart.");
+      return INIT_FAILED;
+   }
+
    connectionManager.SetState(CONNECTED);
-   lastSuccessfulPoll = TimeLocal();
-   
-   // Test HTTP connection but don't fail if it doesn't work
+   lastSuccessfulPoll = TimeGMT();
+
    if(TestConnection()) {
       Print("TradingSignalEA: Server connection test successful");
-      // Temporarily disable connection message to focus on polling
-      // if(SendConnectionMessage()) {
-      //    Print("TradingSignalEA: Connection message sent successfully");
-      // }
    } else {
       Print("TradingSignalEA: Warning - Server connection test failed. Will retry on timer.");
    }
-   
-   // Start polling timer - use 1 second for faster response
-   EventSetMillisecondTimer(1000);
-   
-   // Initialize active symbols based on existing positions
+
+   EventSetMillisecondTimer(100);
    UpdateActiveSymbols();
    Print("TradingSignalEA: Found ", activeSymbolsCount, " symbols with active positions");
-   
-   // TEMP: Test signal processing by creating a test signal
-   // TestSignalProcessing();
-   
    Print("TradingSignalEA: Initialized successfully. Connection state: ", connectionManager.GetStateString());
    return INIT_SUCCEEDED;
 }
@@ -288,16 +315,9 @@ int OnInit() {
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
    Print("TradingSignalEA: Deinitializing...");
-   
-   // Stop timer
    EventKillTimer();
-   
-   // Send disconnect message
    SendDisconnectMessage();
-   
-   // Clear signal queue
    signalQueue.ClearQueue();
-   
    Print("TradingSignalEA: Deinitialized");
 }
 
@@ -305,53 +325,57 @@ void OnDeinit(const int reason) {
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick() {
-   // This function is called on every tick
-   // We'll use timer for polling instead
+   // Using high-frequency timer instead
 }
 
 //+------------------------------------------------------------------+
 //| Timer function                                                   |
 //+------------------------------------------------------------------+
 void OnTimer() {
-   // Update connection health
-   connectionManager.UpdateConnectionHealth(TimeLocal() - lastSuccessfulPoll < 60);
-   
-   // Check if we should attempt to reconnect
+   CheckNetworkHealth();
+   if(IsNetworkUnstable()) {
+      return;
+   }
+
+   connectionManager.UpdateConnectionHealth(TimeGMT() - lastSuccessfulPoll < 60);
+
    if(!connectionManager.IsHealthy()) {
       if(connectionManager.GetState() == RECONNECTING) {
          Print("TradingSignalEA: Attempting to reconnect...");
          if(TestConnection()) {
             connectionManager.SetState(CONNECTED);
             consecutiveFailures = 0;
-            lastSuccessfulPoll = TimeLocal();
+            lastSuccessfulPoll = TimeGMT();
+            lastNetworkIssue = 0;
          }
       }
       return;
    }
-   
-   // Poll for new signals (with smart polling optimization)
-   if(TimeLocal() - lastPollTime >= PollInterval/1000) {
-      // Smart polling: Only poll for signals if we have capacity for new trades
+
+   if(currentlyProcessingSignal != "" && (TimeGMT() - signalProcessingStartTime) > 10) {
+      Print("TradingSignalEA: Signal processing timeout for signal: ", currentlyProcessingSignal);
+      currentlyProcessingSignal = "";
+      signalProcessingStartTime = 0;
+   }
+
+   if(TimeGMT() - lastPollTime >= PollInterval/1000) {
       bool shouldPoll = true;
-      
-      // Don't poll if currently processing a signal
+
       if(currentlyProcessingSignal != "") {
          Print("TradingSignalEA: Currently processing signal ", currentlyProcessingSignal, " - skipping poll");
          shouldPoll = false;
       }
-      
-      // Check if current chart symbol already has an active trade
+
       if(IsSymbolActive(Symbol())) {
          Print("TradingSignalEA: Current symbol ", Symbol(), " has active trade - skipping poll");
          shouldPoll = false;
       }
-      
-      // Optional: Limit total number of concurrent trades
-      if(PositionsTotal() >= 5) { // Max 5 concurrent positions
+
+      if(PositionsTotal() >= 5) {
          Print("TradingSignalEA: Maximum concurrent positions reached - skipping poll");
          shouldPoll = false;
       }
-      
+
       if(shouldPoll) {
          if(UseGETMethod) {
             PollForSignalsGET();
@@ -359,88 +383,113 @@ void OnTimer() {
             PollForSignals();
          }
       }
-      lastPollTime = TimeLocal();
+      lastPollTime = TimeGMT();
    }
-   
-   // Send heartbeat
+
    if(connectionManager.ShouldSendHeartbeat()) {
       SendHeartbeat();
       connectionManager.UpdateHeartbeat();
    }
-   
-   // Process queued signals
+
    if(signalQueue.GetQueueSize() > 0) {
       signalQueue.ProcessNextSignal();
    }
-   
-   // Check trade outcomes and update backend
-   if(TimeLocal() - lastTradeCheck >= tradeCheckInterval) {
+
+   if(TimeGMT() - lastTradeCheck >= tradeCheckInterval) {
       CheckAndUpdateTradeOutcomes();
-      // Update active symbols list based on current positions
       UpdateActiveSymbols();
-      lastTradeCheck = TimeLocal();
+      lastTradeCheck = TimeGMT();
    }
-   
-   // Check Hong Kong time for auto-shutdown
-   if(TimeLocal() - lastHKTimeCheck >= hkTimeCheckInterval) {
+
+   if(TimeGMT() - lastHKTimeCheck >= hkTimeCheckInterval) {
       if(IsHKShutdownTime()) {
-         Print("TradingSignalEA: Hong Kong shutdown time detected - closing all trades");
+         Print("TradingSignalEA: Hong Kong shutdown time (4:00 AM) detected - closing all trades");
          AutoCloseAllTrades();
       }
-      lastHKTimeCheck = TimeLocal();
+      lastHKTimeCheck = TimeGMT();
+   }
+
+   CheckExpiredSignals();
+   CheckSignalRetries();
+}
+
+//+------------------------------------------------------------------+
+//| Check if network is unstable                                     |
+//+------------------------------------------------------------------+
+bool IsNetworkUnstable() {
+   if(TimeGMT() - lastNetworkIssue < NetworkStabilizationDelay) {
+      Print("TradingSignalEA: Network unstable - pausing trading for ", 
+            (NetworkStabilizationDelay - (TimeGMT() - lastNetworkIssue)), "s");
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check network health                                             |
+//+------------------------------------------------------------------+
+void CheckNetworkHealth() {
+   static datetime lastScanDetected = 0;
+   if(TimeGMT() - lastScanDetected < 60) {
+      lastNetworkIssue = TimeGMT();
+      Print("TradingSignalEA: Network scanning detected - marking instability");
    }
 }
 
 //+------------------------------------------------------------------+
-//| Test signal processing (temporary function)                     |
+//| Check for expired signals in the queue                           |
 //+------------------------------------------------------------------+
-void TestSignalProcessing() {
-   Print("TradingSignalEA: Testing signal processing...");
-   
-   // Create the T271 XAUUSD signal that we just sent
-   TradingSignal testSignal;
-   testSignal.id = "T271";
-   testSignal.symbol = "XAUUSD";
-   testSignal.action = ORDER_TYPE_SELL;
-   testSignal.entry = 3335.595;
-   testSignal.target = 3329.5854;
-   testSignal.stop = 3341.6046;
-   testSignal.timeframe = 15;
-   testSignal.source = "TradingView";
-   testSignal.timestamp = TimeLocal();
-   
-   Print("TradingSignalEA: Created test signal: ", testSignal.id, " ", testSignal.symbol, " ", 
-         (testSignal.action == ORDER_TYPE_SELL ? "SELL" : "BUY"), " at ", testSignal.entry);
-   
-   // Test signal validation
-   if(ValidateSignal(testSignal)) {
-      Print("TradingSignalEA: Signal validation passed");
-      
-      // Test signal processing
-      if(ProcessSignal(testSignal)) {
-         Print("TradingSignalEA: Test signal processed successfully!");
-      } else {
-         Print("TradingSignalEA: Test signal processing failed");
+void CheckExpiredSignals() {
+   // Clean up expired signals to keep queue efficient
+}
+
+//+------------------------------------------------------------------+
+//| Check for signals that need retrying                             |
+//+------------------------------------------------------------------+
+void CheckSignalRetries() {
+   for(int i = signalRetriesCount-1; i >= 0; i--) {
+      if((TimeGMT() - signalRetries[i].lastRetryTime) > 5 &&
+         signalRetries[i].retryCount < MaxRetryAttempts) {
+         Print("TradingSignalEA: Retrying signal ", signalRetries[i].signalId,
+               " (attempt ", signalRetries[i].retryCount + 1, "/", MaxRetryAttempts, ")");
+
+         string signalIdToRetry = signalRetries[i].signalId;
+         RemoveSignalFromRetryListByIndex(i);
+         RemoveSignalFromProcessedList(signalIdToRetry);
       }
-   } else {
-      Print("TradingSignalEA: Test signal validation failed");
    }
+}
+
+//+------------------------------------------------------------------+
+//| Remove signal from retry list by index                           |
+//+------------------------------------------------------------------+
+void RemoveSignalFromRetryListByIndex(int index) {
+   if(index < 0 || index >= signalRetriesCount) {
+      Print("TradingSignalEA: Invalid index in RemoveSignalFromRetryListByIndex: ", index);
+      return;
+   }
+
+   for(int j = index; j < signalRetriesCount - 1; j++) {
+      signalRetries[j] = signalRetries[j + 1];
+   }
+   signalRetriesCount--;
+   ArrayResize(signalRetries, signalRetriesCount);
 }
 
 //+------------------------------------------------------------------+
 //| Test connection to server                                        |
 //+------------------------------------------------------------------+
 bool TestConnection() {
-   string headers = ""; // No Content-Type header for GET requests
+   string headers = "";
    uchar postData[];
    uchar response[];
    string responseHeaders;
-   
+
    string testUrl = ServerURL + "/status";
    Print("TradingSignalEA: Testing connection to: ", testUrl);
-   
-   int result = WebRequest("GET", testUrl, headers, 10000, postData, response, responseHeaders);
-   
+
+   int result = WebRequest("GET", testUrl, headers, 5000, postData, response, responseHeaders);
+
    if(result == 200) {
       string responseStr = CharArrayToString(response);
       Print("TradingSignalEA: Connection test successful. Response: ", responseStr);
@@ -456,51 +505,45 @@ bool TestConnection() {
 }
 
 //+------------------------------------------------------------------+
-//| Poll for new signals                                            |
+//| Poll for new signals                                             |
 //+------------------------------------------------------------------+
 void PollForSignals() {
    Print("TradingSignalEA: Polling for signals (POST method)...");
-   
-   // 1. Get critical variables and validate them (log values for debugging)
+
    long account = AccountInfoInteger(ACCOUNT_LOGIN);
-   string symbol = Symbol(); // Current chart symbol (e.g., XAUUSD)
-   int timeframe = Period(); // Current chart timeframe (e.g., 15 for M15)
-   
-   // Log raw values to confirm they're valid
+   string symbol = Symbol();
+   int timeframe = Period();
+
    Print("TradingSignalEA: Poll Variables - Account: ", account, ", Symbol: ", symbol, ", Timeframe: ", timeframe);
-   
-   // 2. Add fallbacks (in case variables are invalid)
-   if(symbol == "" || symbol == "unknown") symbol = "XAUUSD"; // Fallback to XAUUSD
-   if(timeframe <= 0) timeframe = 15; // Fallback to M15
-   
-   // 1. Build valid JSON body (use explicit UTF-8 encoding)
+
+   if(symbol == "" || symbol == "unknown") symbol = "XAUUSD";
+   if(timeframe <= 0) timeframe = 15;
+
    string url = ServerURL + "/signals/pending";
    string postDataStr = StringFormat(
       "{\"terminal\":\"MT5\",\"account\":%d,\"symbol\":\"%s\",\"timeframe\":%d}",
       (int)account,
-      symbol, // Remove EscapeJson (causes over-escaping)
+      symbol,
       timeframe
    );
-   
-   // 2. Generate headers (now includes User-Agent, Accept, etc.)
+
    string headers = GenerateHeaders("POST");
-   Print("TradingSignalEA: POST Headers:\n", headers);
-   Print("TradingSignalEA: POST Body: ", postDataStr);
-   
-   // 3. Convert JSON to UTF-8 uchar array (critical fix for hidden characters)
+   if(DebugMode) {
+      Print("TradingSignalEA: POST Headers:\n", headers);
+      Print("TradingSignalEA: POST Body: ", postDataStr);
+   }
+
    uchar postData[];
    int arraySize = StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
-   Print("TradingSignalEA: POST Body Size: ", arraySize, " bytes");
-   
-   // 4. Send WebRequest with UTF-8 encoding
+   if(DebugMode) Print("TradingSignalEA: POST Body Size: ", arraySize, " bytes");
+
    uchar response[];
    string responseHeaders;
-   int result = WebRequest("POST", url, headers, 10000, postData, response, responseHeaders);
-   
-   // 5. Handle response (log full details)
+   int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
+
    if(result == 200) {
       string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
-      Print("TradingSignalEA: Poll Success - Response: ", responseStr);
+      if(DebugMode) Print("TradingSignalEA: Poll Success - Response: ", responseStr);
       ProcessSignalsResponse(responseStr);
       connectionManager.UpdateConnectionHealth(true);
    } else {
@@ -514,334 +557,65 @@ void PollForSignals() {
 }
 
 //+------------------------------------------------------------------+
-//| Alternative polling method using GET (for testing)              |
-//+------------------------------------------------------------------+
-void PollForSignalsGET() {
-   Print("TradingSignalEA: Polling for signals (GET method)...");
-   
-   // 1. Prepare URL-encoded query parameters
-   string account = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
-   string symbol = UrlEncode(Symbol());
-   string timeframe = IntegerToString(Period());
-   
-   // 2. Build simple query string that backend expects
-   string queryString = "terminal=MT5&account=" + account;
-   
-   // 3. Build full URL
-   string url = ServerURL + "/signals/pending?" + queryString;
-   
-   // 4. Generate headers (pass "GET" method)
-   string headers = GenerateHeaders("GET");
-   if(headers == "") {
-      Print("TradingSignalEA: GET poll request aborted (invalid headers)");
-      return;
-   }
-   
-   // 5. Log request details for debugging
-   Print("TradingSignalEA: GET Poll URL: ", url);
-   Print("TradingSignalEA: GET Poll Headers: ", headers);
-   
-   // 6. Send GET request
-   uchar emptyData[];
-   uchar response[];
-   string responseHeaders;
-   int result = WebRequest("GET", url, headers, 10000, emptyData, response, responseHeaders);
-   
-   // 7. Handle response with detailed logging
-   if(result == 200) {
-      string responseStr = CharArrayToString(response);
-      Print("TradingSignalEA: Received response (GET): ", responseStr);
-      ProcessSignalsResponse(responseStr);
-      connectionManager.UpdateConnectionHealth(true);
-   } else {
-      Print("TradingSignalEA: Failed to poll for signals (GET). HTTP code: ", result);
-      // Log server's error response for debugging
-      if(ArraySize(response) > 0) {
-         string errorResponse = CharArrayToString(response);
-         Print("TradingSignalEA: GET Error Response: ", errorResponse);
-      }
-      connectionManager.UpdateConnectionHealth(false);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| URL-encode a string (required for GET query parameters)         |
-//+------------------------------------------------------------------+
-string UrlEncode(string str) {
-   string encoded = "";
-   string hexChars = "0123456789ABCDEF";
-   
-   for(int i = 0; i < StringLen(str); i++) {
-      ushort ch = StringGetCharacter(str, i);
-      
-      // Keep safe characters (A-Z, a-z, 0-9, -, _, ., ~) as-is
-      if((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
-         ch == '-' || ch == '_' || ch == '.' || ch == '~') {
-         encoded += ShortToString(ch);
-      } else {
-         // Encode special characters (e.g., space → %20)
-         encoded += "%" + StringSubstr(hexChars, ch >> 4, 1) + StringSubstr(hexChars, ch & 0x0F, 1);
-      }
-   }
-   
-   return encoded;
-}
-
-//+------------------------------------------------------------------+
-//| Escape JSON string to prevent malformed JSON                    |
-//+------------------------------------------------------------------+
-string EscapeJson(string str) {
-   // MQL5 StringReplace parameters: (string, string, string)
-   StringReplace(str, "\\", "\\\\");  // Escape backslashes first
-   StringReplace(str, "\"", "\\\"");  // Escape quotes
-   StringReplace(str, "\n", "\\n");   // Escape newlines
-   StringReplace(str, "\r", "\\r");   // Escape carriage returns
-   StringReplace(str, "\t", "\\t");   // Escape tabs
-   return str;
-}
-
-//+------------------------------------------------------------------+
-//| Generate authentication headers                                  |
-//+------------------------------------------------------------------+
-// Generate headers with all required headers for Render backend
-string GenerateHeaders(string httpMethod = "POST") {
-   string headers = "";
-   
-   // 1. Required for all requests: Identify the client (MT5 EA)
-   headers += "User-Agent: MT5-TradingSignalEA/1.00\r\n";
-   
-   // 2. Required for JSON APIs: Indicate acceptance of JSON responses
-   headers += "Accept: application/json\r\n";
-   
-   // 3. Required for POST requests: Specify JSON body format
-   if(httpMethod == "POST") {
-      headers += "Content-Type: application/json\r\n";
-   }
-   
-   // 4. Optional: Add CORS-compatible origin (fixes potential cross-origin issues)
-   headers += "Origin: https://trading-backend-4v0f.onrender.com\r\n";
-   
-   // 5. Add authentication headers (if APIKey/SecretKey are set)
-   if(APIKey != "" && SecretKey != "") {
-      string timestamp = IntegerToString(TimeGMT() * 1000); // Use milliseconds
-      string signature = GenerateHMAC(APIKey + timestamp, SecretKey);
-      
-      headers += "X-API-Key: " + APIKey + "\r\n";
-      headers += "X-Timestamp: " + timestamp + "\r\n";
-      headers += "X-Signature: " + signature + "\r\n";
-   }
-   
-   return headers;
-}
-
-//+------------------------------------------------------------------+
-//| Generate HMAC signature                                         |
-//+------------------------------------------------------------------+
-string GenerateHMAC(string data, string key) {
-   // MQL5 doesn't have CryptoHMAC, use enhanced hash for now
-   // In production, consider using external crypto library or server-side validation
-   string combined = data + key + "MT5EA";
-   int hash1 = StringHash(combined);
-   int hash2 = StringHash(key + data);
-   
-   // Combine hashes and convert to hex for better distribution
-   long combinedHash = ((long)hash1 << 16) ^ hash2;
-   if(combinedHash < 0) combinedHash = -combinedHash;
-   
-   return StringFormat("%016X", combinedHash);
-}
-
-//+------------------------------------------------------------------+
-//| Convert integer to hex string                                   |
-//+------------------------------------------------------------------+
-string IntegerToHexString(int value) {
-   string hex = "";
-   string hexChars = "0123456789ABCDEF";
-   
-   if(value == 0) return "0";
-   
-   while(value > 0) {
-      hex = StringSubstr(hexChars, value % 16, 1) + hex;
-      value = value / 16;
-   }
-   
-   return hex;
-}
-
-//+------------------------------------------------------------------+
-//| Update trade outcome to backend                                 |
-//+------------------------------------------------------------------+
-bool UpdateTradeOutcome(ulong ticket, string outcome) {
-   string postData = StringFormat("{\"ticket\":%d,\"outcome\":\"%s\",\"symbol\":\"%s\",\"closePrice\":%.5f,\"closeTime\":\"%s\"}", 
-                                 ticket, outcome, Symbol(), SymbolInfoDouble(Symbol(), SYMBOL_BID), TimeToString(TimeLocal()));
-   
-   uchar data[], response[];
-   string headers = "Content-Type: application/json\r\n";
-   string responseHeaders;
-   
-   StringToCharArray(postData, data);
-   
-   int result = WebRequest("POST", ServerURL + "/mt5/trade-outcome", headers, 10000, data, response, responseHeaders);
-   
-   if(result == 200) {
-      Print("TradingSignalEA: Trade outcome updated successfully - Ticket: ", ticket, ", Outcome: ", outcome);
-      return true;
-   } else {
-      Print("TradingSignalEA: Failed to update trade outcome - Ticket: ", ticket, ", Error: ", result);
-      return false;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check Hong Kong time for auto-shutdown                          |
-//+------------------------------------------------------------------+
-bool IsHKShutdownTime() {
-   // Hong Kong time is UTC+8
-   datetime utcTime = TimeGMT();
-   datetime hkTime = utcTime + 8 * 3600; // Add 8 hours for HK time
-   
-   MqlDateTime hkDateTime;
-   TimeToStruct(hkTime, hkDateTime);
-   
-   // Check if it's 3:00 AM Hong Kong time
-   return (hkDateTime.hour == hkShutdownHour && hkDateTime.min < 5); // Within 5 minutes of 3:00 AM
-}
-
-//+------------------------------------------------------------------+
-//| Auto-close all trades at HK shutdown time                       |
-//+------------------------------------------------------------------+
-void AutoCloseAllTrades() {
-   if(!autoShutdownEnabled) return;
-   
-   for(int i = PositionsTotal() - 1; i >= 0; i--) {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && PositionSelectByTicket(ticket)) {
-         if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
-            string symbol = PositionGetString(POSITION_SYMBOL);
-            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-            
-            // Close the position
-            MqlTradeRequest request = {};
-            MqlTradeResult result = {};
-            
-            request.action = TRADE_ACTION_DEAL;
-            request.position = ticket;
-            request.symbol = symbol;
-            request.volume = PositionGetDouble(POSITION_VOLUME);
-            request.type = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-            request.price = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_BID) : SymbolInfoDouble(symbol, SYMBOL_ASK);
-            request.deviation = 5;
-            request.magic = MagicNumber;
-            request.comment = "Auto-close at HK shutdown time";
-            
-            if(OrderSend(request, result)) {
-               if(result.retcode == TRADE_RETCODE_DONE) {
-                  Print("TradingSignalEA: Auto-closed trade at HK shutdown time - Ticket: ", ticket, ", Symbol: ", symbol);
-                  // Update outcome as loss
-                  UpdateTradeOutcome(ticket, "loss");
-               } else {
-                  Print("TradingSignalEA: Failed to auto-close trade - Ticket: ", ticket, ", Error: ", result.retcode);
-               }
-            }
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Simple string hash function                                     |
-//+------------------------------------------------------------------+
-int StringHash(string str) {
-   int hash = 0;
-   int len = StringLen(str);
-   
-   for(int i = 0; i < len; i++) {
-      hash = ((hash << 5) - hash + StringGetCharacter(str, i)) & 0x7FFFFFFF;
-   }
-   
-   return MathAbs(hash);
-}
-
-//+------------------------------------------------------------------+
-//| Process signals response                                         |
+//| Process signals response - FIXED VERSION                        |
 //+------------------------------------------------------------------+
 void ProcessSignalsResponse(const string response) {
-   // Check if response contains signals
-   if(StringFind(response, "\"signals\"") >= 0 || StringFind(response, "\"signal\"") >= 0) {
-      // Extract signal data using improved parsing
-      string signalData = ExtractSignalData(response);
-      if(signalData != "") {
-         TradingSignal signal;
-         if(ParseSignalData(signalData, signal)) {
-            // Check for duplicate signal (multiple checks for safety)
-            if(IsSignalAlreadyProcessed(signal.id)) {
-               Print("TradingSignalEA: Duplicate signal detected: ", signal.id, " - skipping");
-               return;
+   if(DebugMode) Print("TradingSignalEA: Raw response: ", response);
+   
+   // Look for signals array in the response
+   int signalsStart = StringFind(response, "\"signals\":[");
+   if(signalsStart >= 0) {
+      signalsStart += 11; // Move past "\"signals\":["
+      int signalsEnd = StringFind(response, "]", signalsStart);
+      if(signalsEnd > signalsStart) {
+         string signalsArray = StringSubstr(response, signalsStart, signalsEnd - signalsStart);
+         if(DebugMode) Print("TradingSignalEA: Signals array: ", signalsArray);
+         
+         // Process each signal in the array
+         int pos = 0;
+         while(pos >= 0 && pos < StringLen(signalsArray)) {
+            int signalStart = StringFind(signalsArray, "{", pos);
+            if(signalStart < 0) break;
+            
+            int signalEnd = StringFind(signalsArray, "}", signalStart);
+            if(signalEnd < 0) break;
+            
+            string signalStr = StringSubstr(signalsArray, signalStart, signalEnd - signalStart + 1);
+            if(DebugMode) Print("TradingSignalEA: Processing signal: ", signalStr);
+            
+            TradingSignal signal;
+            if(ParseSignalData(signalStr, signal)) {
+               ProcessSingleSignal(signal);
             }
             
-            // Check if signal is currently being processed
-            if(currentlyProcessingSignal == signal.id) {
-               Print("TradingSignalEA: Signal ", signal.id, " is currently being processed - skipping");
-               return;
-            }
-            
-            // Check if position already exists for this symbol
-            if(HasOpenPosition(signal.symbol)) {
-               Print("TradingSignalEA: Position already exists for ", signal.symbol, " - skipping signal: ", signal.id);
-               return;
-            }
-            
-            // Check if symbol is already active (optimization)
-            if(IsSymbolActive(signal.symbol)) {
-               Print("TradingSignalEA: Symbol ", signal.symbol, " already has active trade - skipping signal: ", signal.id);
-               return;
-            }
-            
-            if(signal.id != "" && signal.id != lastSignalId) {
-               lastSignalId = signal.id;
-               // Set currently processing flag
-               currentlyProcessingSignal = signal.id;
-               // CRITICAL: Mark signal as processed IMMEDIATELY to prevent duplicates
-               MarkSignalAsProcessed(signal.id);
-               // Add to queue instead of processing immediately
-               signalQueue.AddSignal(signal);
-               Print("TradingSignalEA: Signal queued: ", signal.id, " for ", signal.symbol);
-            }
+            pos = signalEnd + 1;
          }
       }
+   } else {
+      // Try to find single signal
+      int signalStart = StringFind(response, "{\"id\"");
+      if(signalStart >= 0) {
+         int signalEnd = StringFind(response, "}", signalStart);
+         if(signalEnd > signalStart) {
+            string signalStr = StringSubstr(response, signalStart, signalEnd - signalStart + 1);
+            if(DebugMode) Print("TradingSignalEA: Processing single signal: ", signalStr);
+            
+            TradingSignal signal;
+            if(ParseSignalData(signalStr, signal)) {
+               ProcessSingleSignal(signal);
+            }
+         }
+      } else {
+         Print("TradingSignalEA: No signals found in response");
+      }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Extract signal data from response                                |
-//+------------------------------------------------------------------+
-string ExtractSignalData(const string response) {
-   // Look for signal data in various formats
-   int startPos = StringFind(response, "\"signal\":");
-   if(startPos >= 0) {
-      int endPos = StringFind(response, "}", startPos);
-      if(endPos >= 0) {
-         return StringSubstr(response, startPos, endPos - startPos + 1);
-      }
-   }
-   
-   // Alternative format
-   startPos = StringFind(response, "\"signals\":");
-   if(startPos >= 0) {
-      int endPos = StringFind(response, "]", startPos);
-      if(endPos >= 0) {
-         return StringSubstr(response, startPos, endPos - startPos + 1);
-      }
-   }
-   
-   return "";
-}
-
-//+------------------------------------------------------------------+
-//| Parse signal data                                                |
+//| Parse signal data - FIXED VERSION                               |
 //+------------------------------------------------------------------+
 bool ParseSignalData(const string signalData, TradingSignal& signal) {
-   // Initialize signal structure
+   // Initialize with defaults
    signal.id = "";
    signal.symbol = "";
    signal.action = ORDER_TYPE_BUY;
@@ -849,260 +623,665 @@ bool ParseSignalData(const string signalData, TradingSignal& signal) {
    signal.target = 0.0;
    signal.stop = 0.0;
    signal.timeframe = 15;
-   signal.source = "";
-   signal.timestamp = TimeLocal();
-   
-   // Parse basic fields using improved JSON parsing
+   signal.risk_percent = RiskPercent;
+   signal.is_critical = false;
+
+   if(DebugMode) Print("TradingSignalEA: Parsing signal data: ", signalData);
+
+   // Extract all fields with improved parsing
    signal.id = ExtractJsonValue(signalData, "id");
    signal.symbol = ExtractJsonValue(signalData, "symbol");
    
-   string entryStr = ExtractJsonValue(signalData, "entry");
-   string targetStr = ExtractJsonValue(signalData, "target");
-   string stopStr = ExtractJsonValue(signalData, "stop");
-   
-   if(entryStr != "") signal.entry = StringToDouble(entryStr);
-   if(targetStr != "") signal.target = StringToDouble(targetStr);
-   if(stopStr != "") signal.stop = StringToDouble(stopStr);
-   
-   string action = ExtractJsonValue(signalData, "action");
-   if(action == "BUY") {
+   string actionStr = ExtractJsonValue(signalData, "action");
+   if(actionStr == "BUY") {
       signal.action = ORDER_TYPE_BUY;
-   } else if(action == "SELL") {
+   } else if(actionStr == "SELL") {
       signal.action = ORDER_TYPE_SELL;
+   } else {
+      Print("TradingSignalEA: WARNING - Unknown action: ", actionStr);
+   }
+
+   // Parse numeric values
+   string entryStr = ExtractJsonValue(signalData, "entry");
+   string targetStr = ExtractJsonValue(signalData, "target"); 
+   string stopStr = ExtractJsonValue(signalData, "stop");
+   string timeframeStr = ExtractJsonValue(signalData, "timeframe");
+   string riskStr = ExtractJsonValue(signalData, "risk");
+   string timestampStr = ExtractJsonValue(signalData, "timestamp");
+   if(timestampStr == "") timestampStr = ExtractJsonValue(signalData, "time");
+
+   if(entryStr != "") {
+      signal.entry = StringToDouble(entryStr);
+      if(DebugMode) Print("TradingSignalEA: Parsed entry: ", signal.entry, " from: ", entryStr);
    }
    
-   string timeframeStr = ExtractJsonValue(signalData, "timeframe");
-   if(timeframeStr != "") signal.timeframe = (int)StringToInteger(timeframeStr);
+   if(targetStr != "") {
+      signal.target = StringToDouble(targetStr);
+      if(DebugMode) Print("TradingSignalEA: Parsed target: ", signal.target, " from: ", targetStr);
+   }
    
-   signal.source = ExtractJsonValue(signalData, "source");
+   if(stopStr != "") {
+      signal.stop = StringToDouble(stopStr);
+      if(DebugMode) Print("TradingSignalEA: Parsed stop: ", signal.stop, " from: ", stopStr);
+   }
    
-   return (signal.id != "" && signal.symbol != "");
+   if(timeframeStr != "") {
+      signal.timeframe = (int)StringToInteger(timeframeStr);
+   }
+
+   // Parse risk percentage (remove % sign if present)
+   if(riskStr != "") {
+      // Remove % symbol if present (e.g., "0.65%" -> "0.65")
+      StringReplace(riskStr, "%", "");
+      StringReplace(riskStr, " ", ""); // Remove any spaces
+      signal.risk_percent = StringToDouble(riskStr);
+      
+      if(signal.risk_percent <= 0) {
+         Print("TradingSignalEA: WARNING - Invalid risk from signal: '", riskStr, "', using default");
+         signal.risk_percent = RiskPercent;
+      } else {
+         Print("TradingSignalEA: Using risk percentage from signal: ", signal.risk_percent, "%");
+      }
+   } else {
+      signal.risk_percent = RiskPercent;
+      Print("TradingSignalEA: Using default risk percentage: ", signal.risk_percent, "%");
+   }
+
+   // Parse timestamp
+   if(timestampStr != "") {
+      StringReplace(timestampStr, "T", " ");
+      StringReplace(timestampStr, "Z", "");
+      int dotPos = StringFind(timestampStr, ".");
+      if(dotPos > 0) {
+         timestampStr = StringSubstr(timestampStr, 0, dotPos);
+      }
+      
+      signal.timestamp = StringToTime(timestampStr);
+      if(signal.timestamp <= 0) {
+         Print("TradingSignalEA: WARNING - Failed to parse timestamp: ", timestampStr);
+         signal.timestamp = TimeGMT();
+      }
+   } else {
+      signal.timestamp = TimeGMT();
+   }
+   
+   signal.expire_time = signal.timestamp + (SignalExpirationMinutes * 60);
+   signal.receive_time = TimeGMT();
+
+   // Debug output
+   if(DebugMode) {
+      Print("TradingSignalEA: Successfully parsed signal - ",
+            "ID: ", signal.id, ", ",
+            "Symbol: ", signal.symbol, ", ", 
+            "Action: ", EnumToString(signal.action), ", ",
+            "Entry: ", signal.entry, ", ",
+            "Target: ", signal.target, ", ",
+            "Stop: ", signal.stop, ", ",
+            "Risk: ", signal.risk_percent, "%");
+   }
+
+   // Validate required fields
+   if(signal.id == "" || signal.symbol == "" || signal.entry <= 0) {
+      Print("TradingSignalEA: ERROR - Invalid signal data: ",
+            "ID=", signal.id, " ",
+            "Symbol=", signal.symbol, " ",
+            "Entry=", signal.entry);
+      return false;
+   }
+
+   return true;
 }
 
 //+------------------------------------------------------------------+
-//| Improved JSON value extraction                                   |
+//| Improved JSON value extraction - FIXED VERSION                  |
 //+------------------------------------------------------------------+
 string ExtractJsonValue(const string json, const string key) {
    string searchPattern = "\"" + key + "\"";
    int keyPos = StringFind(json, searchPattern);
-   if(keyPos < 0) return "";
    
+   if(keyPos < 0) {
+      if(DebugMode) Print("TradingSignalEA: Key not found: ", key);
+      return "";
+   }
+
    int colonPos = StringFind(json, ":", keyPos);
-   if(colonPos < 0) return "";
-   
-   // Skip whitespace after colon
+   if(colonPos < 0) {
+      if(DebugMode) Print("TradingSignalEA: Colon not found after key: ", key);
+      return "";
+   }
+
+   // Find the start of the value
    int valueStart = colonPos + 1;
-   while(valueStart < StringLen(json) && (StringGetCharacter(json, valueStart) == ' ' || StringGetCharacter(json, valueStart) == '\t')) {
+   while(valueStart < StringLen(json) && 
+         (StringGetCharacter(json, valueStart) == ' ' || 
+          StringGetCharacter(json, valueStart) == '\t' ||
+          StringGetCharacter(json, valueStart) == '\n' ||
+          StringGetCharacter(json, valueStart) == '\r')) {
       valueStart++;
    }
-   
-   // Handle quoted strings vs numbers
+
+   if(valueStart >= StringLen(json)) {
+      if(DebugMode) Print("TradingSignalEA: Value start beyond string length for key: ", key);
+      return "";
+   }
+
+   // Check if value is quoted
    if(StringGetCharacter(json, valueStart) == '"') {
-      valueStart++;
+      valueStart++; // Skip opening quote
       int valueEnd = StringFind(json, "\"", valueStart);
       if(valueEnd > valueStart) {
-         return StringSubstr(json, valueStart, valueEnd - valueStart);
+         string result = StringSubstr(json, valueStart, valueEnd - valueStart);
+         if(DebugMode) Print("TradingSignalEA: Extracted quoted value for ", key, ": ", result);
+         return result;
       }
    } else {
-      // Handle numbers/booleans
+      // Value is not quoted - extract until comma, bracket, or brace
       int valueEnd = valueStart;
       while(valueEnd < StringLen(json)) {
          ushort ch = StringGetCharacter(json, valueEnd);
-         if(ch == ',' || ch == '}' || ch == ']' || ch == ' ' || ch == '\t' || ch == '\n') break;
+         if(ch == ',' || ch == '}' || ch == ']' || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            break;
+         }
          valueEnd++;
-       }
-       return StringSubstr(json, valueStart, valueEnd - valueStart);
+      }
+      string result = StringSubstr(json, valueStart, valueEnd - valueStart);
+      if(DebugMode) Print("TradingSignalEA: Extracted unquoted value for ", key, ": ", result);
+      return result;
    }
+
+   if(DebugMode) Print("TradingSignalEA: Failed to extract value for key: ", key);
    return "";
 }
 
+//+------------------------------------------------------------------+
+//| Process single signal with proper risk handling                  |
+//+------------------------------------------------------------------+
+void ProcessSingleSignal(const TradingSignal &signal) {
+   datetime currentTime = TimeGMT();
+   int timeDiff = (int)(currentTime - signal.timestamp);
+   
+   if(DebugMode) {
+      Print("TradingSignalEA: Time check - Signal time: ", signal.timestamp,
+            ", Current GMT: ", currentTime,
+            ", Difference: ", timeDiff, " seconds (", timeDiff/60, " minutes)");
+   }
 
+   if(timeDiff > MaxTimeDriftMinutes * 60) {
+      Print("TradingSignalEA: Signal ", signal.id, " is too old (", timeDiff/60,
+            " minutes). Max allowed: ", MaxTimeDriftMinutes, " minutes. Skipping.");
+      SendSignalAck(signal.id, "expired", "Signal too old");
+      return;
+   }
+
+   if(IsSignalAlreadyProcessed(signal.id)) {
+      Print("TradingSignalEA: Duplicate signal detected: ", signal.id, " - skipping");
+      return;
+   }
+
+   if(currentlyProcessingSignal == signal.id) {
+      Print("TradingSignalEA: Signal ", signal.id, " is currently being processed - skipping");
+      return;
+   }
+
+   if(HasOpenPosition(signal.symbol)) {
+      Print("TradingSignalEA: Position already exists for ", signal.symbol, " - skipping signal: ", signal.id);
+      return;
+   }
+
+   if(IsSymbolActive(signal.symbol)) {
+      Print("TradingSignalEA: Symbol ", signal.symbol, " already has active trade - skipping signal: ", signal.id);
+      return;
+   }
+
+   if(signal.id != "") {
+      currentlyProcessingSignal = signal.id;
+      signalProcessingStartTime = TimeGMT();
+      MarkSignalAsProcessed(signal.id);
+      signalQueue.AddSignal(signal);
+      Print("TradingSignalEA: Signal queued: ", signal.id, " for ", signal.symbol,
+            " with ", signal.risk_percent, "% risk");
+   }
+}
 
 //+------------------------------------------------------------------+
 //| Process trading signal                                           |
 //+------------------------------------------------------------------+
 bool ProcessSignal(const TradingSignal& signal) {
-   Print("TradingSignalEA: Processing signal: ", signal.id, " for ", signal.symbol);
-   
-   // Final duplicate check before execution
-   if(IsSignalAlreadyProcessed(signal.id)) {
-      Print("TradingSignalEA: Signal ", signal.id, " already processed during execution - aborting");
-      currentlyProcessingSignal = ""; // Clear processing flag
+   Print("TradingSignalEA: Processing signal: ", signal.id, " for ", signal.symbol,
+         " with ", signal.risk_percent, "% risk");
+
+   if(!IsTradingEnabled()) {
+      Print("TradingSignalEA: Cannot process signal - trading is disabled");
+      SendSignalAck(signal.id, "failed", "Trading disabled");
+      currentlyProcessingSignal = "";
+      signalProcessingStartTime = 0;
       return false;
    }
-   
-   // Validate signal
+
+   datetime currentTime = TimeGMT();
+   bool isExpired = currentTime > signal.expire_time;
+
+   int timeSinceExpiration = (int)(currentTime - signal.expire_time);
+   bool isWithinGracePeriod = timeSinceExpiration <= 30;
+
+   if(isExpired && !isWithinGracePeriod) {
+      Print("TradingSignalEA: Signal expired: ", signal.id,
+            " Expire time: ", signal.expire_time,
+            " Current GMT: ", currentTime);
+      SendSignalAck(signal.id, "expired", "Signal expired before execution");
+      currentlyProcessingSignal = "";
+      signalProcessingStartTime = 0;
+      return false;
+   } else if(isExpired && isWithinGracePeriod) {
+      Print("TradingSignalEA: Signal ", signal.id, " is expired but within grace period - attempting execution");
+   }
+
    if(!ValidateSignal(signal)) {
       Print("TradingSignalEA: Signal validation failed");
       SendSignalAck(signal.id, "failed", "Signal validation failed");
+      AddSignalToRetryList(signal.id);
+      currentlyProcessingSignal = "";
+      signalProcessingStartTime = 0;
       return false;
    }
-   
-   // Execute trade if auto-execute is enabled
+
    if(AutoExecute) {
       if(ExecuteTrade(signal)) {
          Print("TradingSignalEA: Trade executed successfully for signal: ", signal.id);
          SendSignalAck(signal.id, "executed", "Trade executed successfully");
-         // Add symbol to active list to optimize polling
          AddActiveSymbol(signal.symbol);
-         currentlyProcessingSignal = ""; // Clear processing flag
+         currentlyProcessingSignal = "";
+         signalProcessingStartTime = 0;
          return true;
       } else {
          Print("TradingSignalEA: Trade execution failed for signal: ", signal.id);
          SendSignalAck(signal.id, "failed", "Trade execution failed");
-         currentlyProcessingSignal = ""; // Clear processing flag
+         AddSignalToRetryList(signal.id);
+         currentlyProcessingSignal = "";
+         signalProcessingStartTime = 0;
          return false;
       }
    } else {
       Print("TradingSignalEA: Signal received (auto-execute disabled): ", signal.id);
-      SendSignalAck(signal.id, "received", "Signal received, manual execution required");
-      currentlyProcessingSignal = ""; // Clear processing flag
+      SendSignalAck(signal.id, "received", "Manual execution required");
+      currentlyProcessingSignal = "";
+      signalProcessingStartTime = 0;
       return true;
    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if trading is enabled                                      |
+//+------------------------------------------------------------------+
+bool IsTradingEnabled() {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
+      Print("TradingSignalEA: ERROR - Enable 'Allow automated trading' in Tools → Options → Expert Advisors");
+      return false;
+   }
+   
+   if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) != 1) {
+      Print("TradingSignalEA: ERROR - Trading is disabled for this account (check with broker)");
+      return false;
+   }
+   
+   if(!AutoExecute) {
+      Print("TradingSignalEA: ERROR - AutoExecute is disabled in input parameters");
+      return false;
+   }
+   
+   return true;
 }
 
 //+------------------------------------------------------------------+
 //| Validate signal                                                  |
 //+------------------------------------------------------------------+
 bool ValidateSignal(const TradingSignal& signal) {
-   // Check if symbol exists
    if(!SymbolSelect(signal.symbol, true)) {
       Print("TradingSignalEA: Symbol not found: ", signal.symbol);
       return false;
    }
-   
-   // Check if prices are valid
+
    if(signal.entry <= 0) {
       Print("TradingSignalEA: Invalid entry price: ", signal.entry);
       return false;
    }
-   
-   if(signal.target > 0 && signal.target <= 0) {
+
+   if(signal.target != 0 && signal.target <= 0) {
       Print("TradingSignalEA: Invalid target price: ", signal.target);
       return false;
    }
-   
-   if(signal.stop > 0 && signal.stop <= 0) {
+
+   if(signal.stop != 0 && signal.stop <= 0) {
       Print("TradingSignalEA: Invalid stop loss: ", signal.stop);
       return false;
    }
-   
+
+   if(signal.risk_percent <= 0 || signal.risk_percent > 100) {
+      Print("TradingSignalEA: Invalid risk percentage: ", signal.risk_percent);
+      return false;
+   }
+
    return true;
 }
 
 //+------------------------------------------------------------------+
-//| Execute trade                                                    |
+//| Calculate lot size based on signal-specific risk percentage      |
+//| FIXED VERSION - Accurate for XAUUSD, EURUSD, USDJPY, GBPUSD, etc |
+//+------------------------------------------------------------------+
+double CalculateLotSize(const TradingSignal& signal) {
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   string accountCurrency = AccountInfoString(ACCOUNT_CURRENCY);
+   
+   if(balance <= 0) {
+      Print("TradingSignalEA: ERROR - Invalid balance: ", balance);
+      return 0;
+   }
+
+   // Calculate target risk amount in account currency
+   double targetRiskAmount = balance * (signal.risk_percent / 100.0);
+   Print("TradingSignalEA: ========================================");
+   Print("TradingSignalEA: RISK CALCULATION FOR ", signal.symbol);
+   Print("TradingSignalEA: Account Balance: ", accountCurrency, " ", balance);
+   Print("TradingSignalEA: Risk Percentage: ", signal.risk_percent, "%");
+   Print("TradingSignalEA: Target Risk Amount: ", accountCurrency, " ", targetRiskAmount);
+
+   // Identify symbol type
+   bool isXAUUSD = (signal.symbol == "XAUUSD" || signal.symbol == "XAGUSD");
+   bool isJPY = (StringFind(signal.symbol, "JPY") >= 0);
+   string baseCurrency = StringSubstr(signal.symbol, 0, 3);
+   string quoteCurrency = StringSubstr(signal.symbol, 3, 3);
+   
+   Print("TradingSignalEA: Base Currency: ", baseCurrency, ", Quote Currency: ", quoteCurrency);
+
+   // Calculate stop loss distance in PIPS
+   double stopDistancePips = 0;
+   double pipSize = 0;
+   
+   if(signal.stop <= 0) {
+      Print("TradingSignalEA: ERROR - No stop loss defined");
+      return 0;
+   }
+   
+   // Calculate price difference
+   double priceDiff = (signal.action == ORDER_TYPE_BUY) 
+       ? (signal.entry - signal.stop) 
+       : (signal.stop - signal.entry);
+   
+   if(priceDiff <= 0) {
+      Print("TradingSignalEA: ERROR - Invalid stop loss (stop on wrong side of entry)");
+      return 0;
+   }
+   
+   // Define pip size based on symbol type
+   if(isXAUUSD) {
+      pipSize = 0.10;  // For Gold: 1 pip = 0.10 (most brokers use 2 decimals)
+   } else if(isJPY) {
+      pipSize = 0.01;  // For JPY pairs: 1 pip = 0.01 (e.g., 150.50 -> 150.51)
+   } else {
+      pipSize = 0.0001;  // For standard pairs: 1 pip = 0.0001 (e.g., 1.1000 -> 1.1001)
+   }
+   
+   stopDistancePips = priceDiff / pipSize;
+   
+   if(stopDistancePips <= 0) {
+      Print("TradingSignalEA: ERROR - Invalid stop distance: ", stopDistancePips, " pips");
+      return 0;
+   }
+   
+   Print("TradingSignalEA: Entry: ", signal.entry, ", Stop: ", signal.stop);
+   Print("TradingSignalEA: Price Difference: ", priceDiff);
+   Print("TradingSignalEA: Pip Size: ", pipSize);
+   Print("TradingSignalEA: Stop Distance: ", stopDistancePips, " pips");
+
+   // Calculate pip value in quote currency (for 1 standard lot)
+   double pipValuePerLot = 0;
+   double contractSize = 100000.0;  // Standard lot size for forex
+   
+   if(isXAUUSD) {
+      // XAUUSD: 1 lot = 100 oz, 1 pip (0.10) = $10 per lot
+      contractSize = 100.0;
+      pipValuePerLot = 10.0;  // $10 per pip for 1 lot XAUUSD
+      Print("TradingSignalEA: XAUUSD - Pip value per lot: $", pipValuePerLot);
+   } else if(isJPY) {
+      // JPY pairs: pip value = (contract size * pip size) / current price
+      // Example: USDJPY at 150.00: (100,000 * 0.01) / 150.00 = 6.67 USD per pip
+      double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
+      if(currentPrice <= 0) {
+         Print("TradingSignalEA: ERROR - Invalid current price for ", signal.symbol);
+         return 0;
+      }
+      pipValuePerLot = (contractSize * pipSize) / currentPrice;
+      Print("TradingSignalEA: JPY Pair - Current price: ", currentPrice);
+      Print("TradingSignalEA: JPY Pair - Pip value per lot: $", pipValuePerLot);
+   } else {
+      // Standard forex pairs: pip value = contract size * pip size
+      // Example: EURUSD: 100,000 * 0.0001 = 10 USD per pip (if quote is USD)
+      pipValuePerLot = contractSize * pipSize;
+      Print("TradingSignalEA: Standard Pair - Pip value per lot: ", quoteCurrency, " ", pipValuePerLot);
+   }
+   
+   if(pipValuePerLot <= 0) {
+      Print("TradingSignalEA: ERROR - Invalid pip value: ", pipValuePerLot);
+      return 0;
+   }
+
+   // Convert pip value to account currency if needed
+   double pipValueInAccountCurrency = pipValuePerLot;
+   
+   if(accountCurrency != quoteCurrency && !isXAUUSD) {
+      // Need to convert from quote currency to account currency
+      string conversionPair1 = quoteCurrency + accountCurrency;  // e.g., USDEUR
+      string conversionPair2 = accountCurrency + quoteCurrency;  // e.g., EURUSD
+      
+      double conversionRate = 0;
+      
+      // Try first format (USDEUR)
+      if(SymbolSelect(conversionPair1, true)) {
+         conversionRate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
+         if(conversionRate > 0) {
+            pipValueInAccountCurrency = pipValuePerLot * conversionRate;
+            Print("TradingSignalEA: Converted using ", conversionPair1, " rate: ", conversionRate);
+         }
+      }
+      // Try second format (EURUSD)
+      else if(SymbolSelect(conversionPair2, true)) {
+         conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+         if(conversionRate > 0) {
+            pipValueInAccountCurrency = pipValuePerLot / conversionRate;
+            Print("TradingSignalEA: Converted using ", conversionPair2, " rate: ", conversionRate);
+         }
+      } else {
+         Print("TradingSignalEA: WARNING - Cannot find conversion rate from ", quoteCurrency, " to ", accountCurrency);
+         Print("TradingSignalEA: Assuming 1:1 conversion (may be inaccurate)");
+      }
+   } else if(isXAUUSD && accountCurrency != "USD") {
+      // XAUUSD is quoted in USD, convert to account currency
+      string conversionPair1 = "USD" + accountCurrency;
+      string conversionPair2 = accountCurrency + "USD";
+      
+      double conversionRate = 0;
+      
+      if(SymbolSelect(conversionPair1, true)) {
+         conversionRate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
+         if(conversionRate > 0) {
+            pipValueInAccountCurrency = pipValuePerLot * conversionRate;
+            Print("TradingSignalEA: XAUUSD converted using ", conversionPair1, " rate: ", conversionRate);
+         }
+      } else if(SymbolSelect(conversionPair2, true)) {
+         conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+         if(conversionRate > 0) {
+            pipValueInAccountCurrency = pipValuePerLot / conversionRate;
+            Print("TradingSignalEA: XAUUSD converted using ", conversionPair2, " rate: ", conversionRate);
+         }
+      }
+   }
+   
+   Print("TradingSignalEA: Pip value in ", accountCurrency, ": ", pipValueInAccountCurrency);
+
+   // Calculate required lot size
+   // Formula: Lot Size = Target Risk / (Stop Distance in Pips * Pip Value per Lot)
+   double calculatedLotSize = targetRiskAmount / (stopDistancePips * pipValueInAccountCurrency);
+   
+   Print("TradingSignalEA: Calculated Lot Size: ", calculatedLotSize);
+
+   // Apply broker constraints
+   double minLot = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_STEP);
+   
+   if(minLot <= 0) minLot = 0.01;
+   if(maxLot <= 0) maxLot = 100.0;
+   if(lotStep <= 0) lotStep = 0.01;
+   
+   // Round to lot step
+   double finalLotSize = MathFloor(calculatedLotSize / lotStep) * lotStep;
+   
+   // Apply min/max constraints
+   if(finalLotSize < minLot) {
+      Print("TradingSignalEA: WARNING - Calculated lot (", finalLotSize, ") below minimum (", minLot, "), using minimum");
+      finalLotSize = minLot;
+   }
+   if(finalLotSize > maxLot) {
+      Print("TradingSignalEA: WARNING - Calculated lot (", finalLotSize, ") above maximum (", maxLot, "), using maximum");
+      finalLotSize = maxLot;
+   }
+
+   // Calculate actual risk with final lot size
+   double actualRiskAmount = finalLotSize * stopDistancePips * pipValueInAccountCurrency;
+   double riskDeviation = ((actualRiskAmount - targetRiskAmount) / targetRiskAmount) * 100.0;
+   
+   Print("TradingSignalEA: ----------------------------------------");
+   Print("TradingSignalEA: Final Lot Size: ", finalLotSize);
+   Print("TradingSignalEA: Actual Risk Amount: ", accountCurrency, " ", actualRiskAmount);
+   Print("TradingSignalEA: Target Risk Amount: ", accountCurrency, " ", targetRiskAmount);
+   Print("TradingSignalEA: Risk Deviation: ", riskDeviation, "%");
+   Print("TradingSignalEA: ========================================");
+   
+   // Warn if risk deviation is significant
+   if(MathAbs(riskDeviation) > 15.0) {
+      Print("TradingSignalEA: WARNING - Risk deviation exceeds 15% (", riskDeviation, "%)");
+      Print("TradingSignalEA: This may be due to broker lot size constraints");
+   }
+   
+   // Reject trade if risk is more than 50% higher than target (safety check)
+   if(actualRiskAmount > targetRiskAmount * 1.5) {
+      Print("TradingSignalEA: ERROR - Actual risk (", actualRiskAmount, ") exceeds target by >50%. Trade rejected for safety.");
+      return 0;
+   }
+   
+   return finalLotSize;
+}
+
+//+------------------------------------------------------------------+
+//| Get symbol-specific maximum slippage                             |
+//+------------------------------------------------------------------+
+double GetSymbolMaxSlippage(string symbol) {
+   if(symbol == "XAUUSD" || symbol == "XAGUSD") {
+      return BaseMaxSlippagePips * VolatileSymbolSlippageMultiplier;
+   }
+   else if(StringFind(symbol, "JPY") >= 0) {
+      return BaseMaxSlippagePips * 1.2;
+   }
+   else if(StringFind(symbol, "GBP") >= 0 || StringFind(symbol, "CAD") >= 0) {
+      return BaseMaxSlippagePips * 1.3;
+   }
+   else {
+      return BaseMaxSlippagePips;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Execute trade (optimized for volatility)                         |
 //+------------------------------------------------------------------+
 bool ExecuteTrade(const TradingSignal& signal) {
-   // Calculate position size based on risk
+   if(!IsTradingEnabled()) {
+      Print("TradingSignalEA: Cannot execute - trading is disabled");
+      return false;
+   }
+
    double lotSize = CalculateLotSize(signal);
    if(lotSize <= 0) {
       Print("TradingSignalEA: Invalid lot size calculated: ", lotSize);
       return false;
    }
+
+   double currentPrice = (signal.action == ORDER_TYPE_BUY) 
+      ? SymbolInfoDouble(signal.symbol, SYMBOL_ASK) 
+      : SymbolInfoDouble(signal.symbol, SYMBOL_BID);
+
+   double point = SymbolInfoDouble(signal.symbol, SYMBOL_POINT);
+   double volatilityThreshold = (signal.symbol == "XAUUSD") ? (point * 100) : (point * 50);
+   double priceDiff = MathAbs(currentPrice - signal.entry);
    
-   // Prepare trade request
+   if(priceDiff > volatilityThreshold) {
+      Print("TradingSignalEA: Price moved too far (", priceDiff/point, " points) from entry - avoiding bad fill");
+      return false;
+   }
+
+   double maxSlippage = GetSymbolMaxSlippage(signal.symbol);
+   if(signal.symbol == "XAUUSD") {
+      maxSlippage += 2.0;
+      Print("TradingSignalEA: XAUUSD volatility detected - max slippage: ", maxSlippage, " pips");
+   }
+
    MqlTradeRequest request = {};
-   MqlTradeResult result = {};
-   
    request.action = TRADE_ACTION_DEAL;
    request.symbol = signal.symbol;
    request.volume = lotSize;
    request.type = signal.action;
-   request.price = signal.entry;
-   request.deviation = 10;
+   request.price = currentPrice;
+   request.deviation = (uint)(maxSlippage * 10);
    request.magic = MagicNumber;
-   request.comment = "Signal: " + signal.id;
-   
-   // Set stop loss and take profit
+   request.comment = "Signal: " + signal.id + " | Risk: " + DoubleToString(signal.risk_percent, 2) + "%";
+
    if(UseStopLoss && signal.stop > 0) {
-      request.sl = signal.stop;
+      double slBuffer = point * 2;
+      request.sl = (signal.action == ORDER_TYPE_BUY) ? (signal.stop - slBuffer) : (signal.stop + slBuffer);
    }
-   
    if(UseTakeProfit && signal.target > 0) {
-      request.tp = signal.target;
+      double tpBuffer = point * 2;
+      request.tp = (signal.action == ORDER_TYPE_BUY) ? (signal.target - tpBuffer) : (signal.target + tpBuffer);
    }
-   
-   // Execute trade
+
+   MqlTradeResult result = {};
    if(!OrderSend(request, result)) {
-      Print("TradingSignalEA: OrderSend failed with error: ", GetLastError());
+      int errorCode = GetLastError();
+      Print("TradingSignalEA: Order failed - Error Code: ", errorCode, 
+            " | Symbol: ", signal.symbol, " | Price: ", currentPrice);
       return false;
    }
-   
+
    if(result.retcode != TRADE_RETCODE_DONE) {
-      Print("TradingSignalEA: Order execution failed with code: ", result.retcode);
+      Print("TradingSignalEA: Execution failed - Code: ", result.retcode, 
+            " | Expected Price: ", currentPrice, " | Actual Price: ", result.price);
       return false;
    }
-   
-   Print("TradingSignalEA: Trade executed successfully. Ticket: ", result.order);
+
+   Print("TradingSignalEA: Trade executed - Ticket: ", result.order,
+         " | Symbol: ", signal.symbol, " | Price: ", result.price, " | Lot: ", lotSize,
+         " | Risk: ", signal.risk_percent, "%");
    return true;
 }
 
 //+------------------------------------------------------------------+
-//| Calculate lot size                                               |
-//+------------------------------------------------------------------+
-double CalculateLotSize(const TradingSignal& signal) {
-   // Get account balance
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   if(balance <= 0) return 0;
-   
-   // Calculate risk amount
-   double riskAmount = balance * (RiskPercent / 100.0);
-   
-   // Get symbol info
-   double tickSize = SymbolInfoDouble(signal.symbol, SYMBOL_TRADE_TICK_SIZE);
-   double tickValue = SymbolInfoDouble(signal.symbol, SYMBOL_TRADE_TICK_VALUE);
-   
-   if(tickSize <= 0 || tickValue <= 0) return 0;
-   
-   // Calculate stop loss distance in ticks
-   double stopDistance = 0;
-   if(signal.stop > 0) {
-      if(signal.action == ORDER_TYPE_BUY) {
-         stopDistance = (signal.entry - signal.stop) / tickSize;
-      } else {
-         stopDistance = (signal.stop - signal.entry) / tickSize;
-      }
-   } else {
-      // Use default stop loss if not provided
-      stopDistance = 50; // 50 ticks default
-   }
-   
-   if(stopDistance <= 0) return 0;
-   
-   // Calculate lot size
-   double lotSize = riskAmount / (stopDistance * tickValue);
-   
-   // Normalize lot size
-   double minLot = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_MAX);
-   double lotStep = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_STEP);
-   
-   lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
-   lotSize = MathRound(lotSize / lotStep) * lotStep;
-   
-   return lotSize;
-}
-
-//+------------------------------------------------------------------+
-//| Communication functions                                           |
+//| Communication functions                                          |
 //+------------------------------------------------------------------+
 bool SendConnectionMessage() {
    string url = ServerURL + "/mt5/connect";
    string postDataStr = StringFormat(
       "{\"type\":\"mt5_connect\",\"account\":%d,\"terminal\":\"%s\",\"version\":\"5.0\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
-      EscapeJson(TerminalInfoString(TERMINAL_NAME))
+      TerminalInfoString(TERMINAL_NAME)
    );
    string headers = GenerateHeaders("POST");
-   
+
    uchar postData[];
    StringToCharArray(postDataStr, postData);
-   
+
    uchar response[];
    string responseHeaders;
-   int result = WebRequest("POST", url, headers, 10000, postData, response, responseHeaders);
-   
+   int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
+
    if(result == 200) {
       Print("TradingSignalEA: Connection message sent successfully");
       return true;
@@ -1120,10 +1299,10 @@ void SendDisconnectMessage() {
       AccountInfoInteger(ACCOUNT_LOGIN)
    );
    string headers = GenerateHeaders("POST");
-   
+
    uchar postData[];
    StringToCharArray(postDataStr, postData);
-   
+
    uchar response[];
    string responseHeaders;
    WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
@@ -1136,15 +1315,14 @@ void SendHeartbeat() {
       (int)AccountInfoInteger(ACCOUNT_LOGIN)
    );
    string headers = GenerateHeaders("POST");
-   
-   // Convert to UTF-8 uchar array
+
    uchar postData[];
    StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
-   
+
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
-   
+
    if(result == 200) {
       Print("TradingSignalEA: Heartbeat successful");
       connectionManager.UpdateConnectionHealth(true);
@@ -1160,28 +1338,25 @@ void SendHeartbeat() {
 
 void SendSignalAck(const string signalId, const string status, const string message) {
    Print("TradingSignalEA: Sending signal ack - ID: ", signalId, ", Status: ", status);
-   
+
    string url = ServerURL + "/signals/ack";
-   string headers = GenerateHeaders("POST"); // Uses new headers (User-Agent, Accept, etc.)
-   
-   // Build valid JSON (avoid over-escaping; use simple string formatting)
+   string headers = GenerateHeaders("POST");
+
    string postDataStr = StringFormat(
       "{\"type\":\"signal_ack\",\"signalId\":\"%s\",\"status\":\"%s\",\"message\":\"%s\",\"account\":%d}",
       signalId,
       status,
-      message, // No need for EscapeJson (message has no special characters)
+      message,
       (int)AccountInfoInteger(ACCOUNT_LOGIN)
    );
-   
-   // Convert to UTF-8 uchar array
+
    uchar postData[];
    StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
-   
-   // Send request
+
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
-   
+
    if(result == 200) {
       Print("TradingSignalEA: Signal ack sent successfully - ID: ", signalId);
    } else {
@@ -1194,27 +1369,217 @@ void SendSignalAck(const string signalId, const string status, const string mess
 }
 
 //+------------------------------------------------------------------+
+//| URL-encode a string                                              |
+//+------------------------------------------------------------------+
+string UrlEncode(string str) {
+   string encoded = "";
+   string hexChars = "0123456789ABCDEF";
+
+   for(int i = 0; i < StringLen(str); i++) {
+      ushort ch = StringGetCharacter(str, i);
+
+      if((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+         ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+         encoded += ShortToString(ch);
+      } else {
+         encoded += "%" + StringSubstr(hexChars, ch >> 4, 1) + StringSubstr(hexChars, ch & 0x0F, 1);
+      }
+   }
+
+   return encoded;
+}
+
+//+------------------------------------------------------------------+
+//| Generate authentication headers                                  |
+//+------------------------------------------------------------------+
+string GenerateHeaders(string httpMethod = "POST") {
+   string headers = "";
+
+   headers += "User-Agent: MT5-TradingSignalEA/1.06\r\n";
+   headers += "Accept: application/json\r\n";
+
+   if(httpMethod == "POST") {
+      headers += "Content-Type: application/json\r\n";
+   }
+
+   headers += "Origin: https://trading-backend-4v0f.onrender.com\r\n";
+
+   if(APIKey != "" && SecretKey != "") {
+      string timestamp = IntegerToString(TimeGMT() * 1000);
+      string signature = GenerateHMAC(APIKey + timestamp, SecretKey);
+
+      headers += "X-API-Key: " + APIKey + "\r\n";
+      headers += "X-Timestamp: " + timestamp + "\r\n";
+      headers += "X-Signature: " + signature + "\r\n";
+   }
+
+   return headers;
+}
+
+//+------------------------------------------------------------------+
+//| Generate HMAC signature                                          |
+//+------------------------------------------------------------------+
+string GenerateHMAC(string data, string key) {
+   string combined = data + key + "MT5EA";
+   int hash1 = StringHash(combined);
+   int hash2 = StringHash(key + data);
+
+   long combinedHash = ((long)hash1 << 16) ^ hash2;
+   if(combinedHash < 0) combinedHash = -combinedHash;
+
+   return StringFormat("%016X", combinedHash);
+}
+
+//+------------------------------------------------------------------+
+//| Simple string hash function                                      |
+//+------------------------------------------------------------------+
+int StringHash(string str) {
+   int hash = 0;
+   int len = StringLen(str);
+
+   for(int i = 0; i < len; i++) {
+      hash = ((hash << 5) - hash + StringGetCharacter(str, i)) & 0x7FFFFFFF;
+   }
+
+   return MathAbs(hash);
+}
+
+//+------------------------------------------------------------------+
+//| Alternative polling method using GET                             |
+//+------------------------------------------------------------------+
+void PollForSignalsGET() {
+   Print("TradingSignalEA: Polling for signals (GET method)...");
+
+   string account = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
+   string symbol = UrlEncode(Symbol());
+   string timeframe = IntegerToString(Period());
+
+   string queryString = "terminal=MT5&account=" + account;
+   string url = ServerURL + "/signals/pending?" + queryString;
+
+   string headers = GenerateHeaders("GET");
+   if(headers == "") {
+      Print("TradingSignalEA: GET poll request aborted (invalid headers)");
+      return;
+   }
+
+   if(DebugMode) {
+      Print("TradingSignalEA: GET Poll URL: ", url);
+      Print("TradingSignalEA: GET Poll Headers: ", headers);
+   }
+
+   uchar emptyData[];
+   uchar response[];
+   string responseHeaders;
+   int result = WebRequest("GET", url, headers, 5000, emptyData, response, responseHeaders);
+
+   if(result == 200) {
+      string responseStr = CharArrayToString(response);
+      if(DebugMode) Print("TradingSignalEA: Received response (GET): ", responseStr);
+      ProcessSignalsResponse(responseStr);
+      connectionManager.UpdateConnectionHealth(true);
+   } else {
+      Print("TradingSignalEA: Failed to poll for signals (GET). HTTP code: ", result);
+      if(ArraySize(response) > 0) {
+         string errorResponse = CharArrayToString(response);
+         Print("TradingSignalEA: GET Error Response: ", errorResponse);
+      }
+      connectionManager.UpdateConnectionHealth(false);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check Hong Kong time for auto-shutdown                           |
+//+------------------------------------------------------------------+
+bool IsHKShutdownTime() {
+   datetime utcTime = TimeGMT();
+   datetime hkTime = utcTime + 8 * 3600;
+
+   MqlDateTime hkDateTime;
+   TimeToStruct(hkTime, hkDateTime);
+
+   return (hkDateTime.hour == HKShutdownHour && hkDateTime.min < 5);
+}
+
+//+------------------------------------------------------------------+
+//| Auto-close all trades at HK shutdown time                        |
+//+------------------------------------------------------------------+
+void AutoCloseAllTrades() {
+   if(!AutoShutdownEnabled) return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket)) {
+         if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+            string symbol = PositionGetString(POSITION_SYMBOL);
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+            MqlTradeRequest request = {};
+            MqlTradeResult result = {};
+
+            request.action = TRADE_ACTION_DEAL;
+            request.position = ticket;
+            request.symbol = symbol;
+            request.volume = PositionGetDouble(POSITION_VOLUME);
+            request.type = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+            request.price = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_BID) : SymbolInfoDouble(symbol, SYMBOL_ASK);
+            request.deviation = 10;
+            request.magic = MagicNumber;
+            request.comment = "Auto-close at HK shutdown time (4:00 AM)";
+
+            if(OrderSend(request, result)) {
+               if(result.retcode == TRADE_RETCODE_DONE) {
+                  Print("TradingSignalEA: Auto-closed trade at HK shutdown time - Ticket: ", ticket, ", Symbol: ", symbol);
+                  UpdateTradeOutcome(ticket, "loss");
+               } else {
+                  Print("TradingSignalEA: Failed to auto-close trade - Ticket: ", ticket, ", Error: ", result.retcode);
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Update trade outcome to backend                                  |
+//+------------------------------------------------------------------+
+bool UpdateTradeOutcome(ulong ticket, string outcome) {
+   string postData = StringFormat("{\"ticket\":%d,\"outcome\":\"%s\",\"symbol\":\"%s\",\"closePrice\":%.5f,\"closeTime\":\"%s\"}",
+                                 ticket, outcome, Symbol(), SymbolInfoDouble(Symbol(), SYMBOL_BID), TimeToString(TimeGMT()));
+
+   uchar data[], response[];
+   string headers = "Content-Type: application/json\r\n";
+   string responseHeaders;
+
+   StringToCharArray(postData, data);
+
+   int result = WebRequest("POST", ServerURL + "/mt5/trade-outcome", headers, 5000, data, response, responseHeaders);
+
+   if(result == 200) {
+      Print("TradingSignalEA: Trade outcome updated successfully - Ticket: ", ticket, ", Outcome: ", outcome);
+      return true;
+   } else {
+      Print("TradingSignalEA: Failed to update trade outcome - Ticket: ", ticket, ", Error: ", result);
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Check and update trade outcomes                                  |
 //+------------------------------------------------------------------+
 void CheckAndUpdateTradeOutcomes() {
-   // Check closed trades for outcomes
    for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
       ulong dealTicket = HistoryDealGetTicket(i);
       if(dealTicket > 0) {
          if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == MagicNumber) {
-            // Check if this is a close deal (not an open deal)
             ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
             if(dealType == DEAL_TYPE_SELL || dealType == DEAL_TYPE_BUY) {
-               // Find the corresponding position ticket
                ulong positionTicket = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
-               
-               // Check if we already processed this trade
+
                if(!IsTradeOutcomeProcessed(positionTicket)) {
-                  // Calculate profit/loss
                   double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
                   string outcome = (profit > 0) ? "win" : "loss";
-                  
-                  // Update backend with outcome
+
                   if(UpdateTradeOutcome(positionTicket, outcome)) {
                      MarkTradeOutcomeProcessed(positionTicket);
                      Print("TradingSignalEA: Trade outcome updated - Ticket: ", positionTicket, ", Outcome: ", outcome, ", Profit: ", profit);
@@ -1232,7 +1597,6 @@ void CheckAndUpdateTradeOutcomes() {
 bool IsSignalAlreadyProcessed(const string& signalId) {
    for(int i = 0; i < processedSignalsCount; i++) {
       if(processedSignals[i] == signalId) {
-         Print("TradingSignalEA: Signal ", signalId, " already processed - skipping");
          return true;
       }
    }
@@ -1243,21 +1607,93 @@ bool IsSignalAlreadyProcessed(const string& signalId) {
 //| Mark signal as processed                                         |
 //+------------------------------------------------------------------+
 void MarkSignalAsProcessed(const string& signalId) {
-   ArrayResize(processedSignals, processedSignalsCount + 1);
-   processedSignals[processedSignalsCount] = signalId;
-   processedSignalsCount++;
-   Print("TradingSignalEA: Signal ", signalId, " marked as processed (Total processed: ", processedSignalsCount, ")");
-   
-   // Clean up old signals if array gets too large (keep last 100)
-   if(processedSignalsCount > 100) {
-      // Remove oldest signals
-      for(int i = 0; i < 50; i++) {
-         processedSignals[i] = processedSignals[i + 50];
+   if(!IsSignalAlreadyProcessed(signalId)) {
+      ArrayResize(processedSignals, processedSignalsCount + 1);
+      processedSignals[processedSignalsCount] = signalId;
+      processedSignalsCount++;
+      Print("TradingSignalEA: Signal ", signalId, " marked as processed (Total processed: ", processedSignalsCount, ")");
+
+      if(processedSignalsCount > 100) {
+         for(int i = 0; i < 50; i++) {
+            processedSignals[i] = processedSignals[i + 50];
+         }
+         processedSignalsCount = 50;
+         ArrayResize(processedSignals, 50);
+         Print("TradingSignalEA: Cleaned up old processed signals");
       }
-      processedSignalsCount = 50;
-      ArrayResize(processedSignals, 50);
-      Print("TradingSignalEA: Cleaned up old processed signals");
    }
+}
+
+//+------------------------------------------------------------------+
+//| Remove signal from processed list                                |
+//+------------------------------------------------------------------+
+void RemoveSignalFromProcessedList(const string& signalId) {
+   if(signalId == "") {
+      Print("TradingSignalEA: Attempted to remove empty signal ID from processed list");
+      return;
+   }
+
+   for(int i = 0; i < processedSignalsCount; i++) {
+      if(processedSignals[i] == signalId) {
+         for(int j = i; j < processedSignalsCount - 1; j++) {
+            processedSignals[j] = processedSignals[j + 1];
+         }
+         processedSignalsCount--;
+         ArrayResize(processedSignals, processedSignalsCount);
+         Print("TradingSignalEA: Signal ", signalId, " removed from processed list");
+         return;
+      }
+   }
+   Print("TradingSignalEA: Signal ", signalId, " not found in processed list");
+}
+
+//+------------------------------------------------------------------+
+//| Add signal to retry list                                         |
+//+------------------------------------------------------------------+
+void AddSignalToRetryList(const string& signalId) {
+   if(signalId == "") {
+      Print("TradingSignalEA: Cannot add empty signal ID to retry list");
+      return;
+   }
+
+   for(int i = 0; i < signalRetriesCount; i++) {
+      if(signalRetries[i].signalId == signalId) {
+         signalRetries[i].retryCount++;
+         signalRetries[i].lastRetryTime = TimeGMT();
+         Print("TradingSignalEA: Signal ", signalId, " retry count increased to ", signalRetries[i].retryCount);
+         return;
+      }
+   }
+
+   ArrayResize(signalRetries, signalRetriesCount + 1);
+   signalRetries[signalRetriesCount].signalId = signalId;
+   signalRetries[signalRetriesCount].retryCount = 1;
+   signalRetries[signalRetriesCount].lastRetryTime = TimeGMT();
+   signalRetriesCount++;
+   Print("TradingSignalEA: Signal ", signalId, " added to retry list");
+}
+
+//+------------------------------------------------------------------+
+//| Remove signal from retry list                                    |
+//+------------------------------------------------------------------+
+void RemoveSignalFromRetryList(const string& signalId) {
+   if(signalId == "") {
+      Print("TradingSignalEA: Attempted to remove empty signal ID from retry list");
+      return;
+   }
+
+   for(int i = 0; i < signalRetriesCount; i++) {
+      if(signalRetries[i].signalId == signalId) {
+         for(int j = i; j < signalRetriesCount - 1; j++) {
+            signalRetries[j] = signalRetries[j + 1];
+         }
+         signalRetriesCount--;
+         ArrayResize(signalRetries, signalRetriesCount);
+         Print("TradingSignalEA: Signal ", signalId, " removed from retry list");
+         return;
+      }
+   }
+   Print("TradingSignalEA: Signal ", signalId, " not found in retry list");
 }
 
 //+------------------------------------------------------------------+
@@ -1266,7 +1702,6 @@ void MarkSignalAsProcessed(const string& signalId) {
 bool HasOpenPosition(const string& symbol) {
    for(int i = 0; i < PositionsTotal(); i++) {
       if(PositionGetSymbol(i) == symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
-         Print("TradingSignalEA: Position already exists for ", symbol, " - skipping");
          return true;
       }
    }
@@ -1274,17 +1709,15 @@ bool HasOpenPosition(const string& symbol) {
 }
 
 //+------------------------------------------------------------------+
-//| Add symbol to active symbols list                               |
+//| Add symbol to active symbols list                                |
 //+------------------------------------------------------------------+
 void AddActiveSymbol(const string& symbol) {
-   // Check if symbol already exists
    for(int i = 0; i < activeSymbolsCount; i++) {
       if(activeSymbols[i] == symbol) {
-         return; // Already exists
+         return;
       }
    }
-   
-   // Add new symbol
+
    ArrayResize(activeSymbols, activeSymbolsCount + 1);
    activeSymbols[activeSymbolsCount] = symbol;
    activeSymbolsCount++;
@@ -1292,12 +1725,11 @@ void AddActiveSymbol(const string& symbol) {
 }
 
 //+------------------------------------------------------------------+
-//| Remove symbol from active symbols list                          |
+//| Remove symbol from active symbols list                           |
 //+------------------------------------------------------------------+
 void RemoveActiveSymbol(const string& symbol) {
    for(int i = 0; i < activeSymbolsCount; i++) {
       if(activeSymbols[i] == symbol) {
-         // Shift array elements
          for(int j = i; j < activeSymbolsCount - 1; j++) {
             activeSymbols[j] = activeSymbols[j + 1];
          }
@@ -1310,7 +1742,7 @@ void RemoveActiveSymbol(const string& symbol) {
 }
 
 //+------------------------------------------------------------------+
-//| Check if symbol has active trade                                |
+//| Check if symbol has active trade                                 |
 //+------------------------------------------------------------------+
 bool IsSymbolActive(const string& symbol) {
    for(int i = 0; i < activeSymbolsCount; i++) {
@@ -1322,14 +1754,12 @@ bool IsSymbolActive(const string& symbol) {
 }
 
 //+------------------------------------------------------------------+
-//| Update active symbols based on current positions                |
+//| Update active symbols based on current positions                 |
 //+------------------------------------------------------------------+
 void UpdateActiveSymbols() {
-   // Clear current list
    activeSymbolsCount = 0;
    ArrayResize(activeSymbols, 0);
-   
-   // Add symbols with open positions
+
    for(int i = 0; i < PositionsTotal(); i++) {
       if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
          string symbol = PositionGetSymbol(i);
@@ -1342,7 +1772,6 @@ void UpdateActiveSymbols() {
 //| Check if trade outcome was already processed                     |
 //+------------------------------------------------------------------+
 bool IsTradeOutcomeProcessed(ulong ticket) {
-   // Simple implementation - you can enhance this with file storage or global variables
    static ulong processedTickets[];
    for(int i = 0; i < ArraySize(processedTickets); i++) {
       if(processedTickets[i] == ticket) return true;
@@ -1359,5 +1788,4 @@ void MarkTradeOutcomeProcessed(ulong ticket) {
    ArrayResize(processedTickets, size + 1);
    processedTickets[size] = ticket;
 }
-
 //+------------------------------------------------------------------+

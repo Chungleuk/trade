@@ -38,6 +38,7 @@ input int NetworkStabilizationDelay = 300;
 input double ForexCommissionPerLot = 6.0;  // Commission per lot round trip for forex (USD)
 input double GoldCommissionPerLot = 2.0;   // Commission per lot round trip for XAUUSD (USD)
 input bool AccountForBrokerCosts = true;   // Include commission and spread in risk calculation
+input bool AdjustTargetForCosts = false;   // Adjust TP target instead of reducing lot size
 
 //--- Global variables
 datetime lastPollTime = 0;
@@ -1127,7 +1128,8 @@ double CalculateLotSize(const TradingSignal& signal) {
    double totalCostPerLot = 0;
    double calculatedLotSize = 0;
    
-   if(AccountForBrokerCosts) {
+   if(AccountForBrokerCosts && !AdjustTargetForCosts) {
+      // METHOD 1: Reduce lot size to account for broker costs
       double spreadPoints = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
       double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
       
@@ -1170,11 +1172,17 @@ double CalculateLotSize(const TradingSignal& signal) {
       
       Print("TradingSignalEA: Stop Risk per Lot: ", accountCurrency, " ", stopDistancePips * pipValueInAccountCurrency);
       Print("TradingSignalEA: Effective Risk per Lot (with costs): ", accountCurrency, " ", effectiveRiskPerLot);
-      Print("TradingSignalEA: Calculated Lot Size (accounting for costs): ", calculatedLotSize);
+      Print("TradingSignalEA: Calculated Lot Size (METHOD 1 - reduced lot): ", calculatedLotSize);
    } else {
-      // Original formula without broker costs
+      // METHOD 2: Calculate lot size WITHOUT reducing for costs (costs will be compensated by adjusting TP)
+      // OR if broker cost accounting is disabled entirely
       calculatedLotSize = targetRiskAmount / (stopDistancePips * pipValueInAccountCurrency);
-      Print("TradingSignalEA: Calculated Lot Size (NO cost adjustment): ", calculatedLotSize);
+      
+      if(AdjustTargetForCosts) {
+         Print("TradingSignalEA: Calculated Lot Size (METHOD 2 - will adjust TP target): ", calculatedLotSize);
+      } else {
+         Print("TradingSignalEA: Calculated Lot Size (NO cost adjustment): ", calculatedLotSize);
+      }
    }
 
    // Apply broker constraints
@@ -1199,12 +1207,43 @@ double CalculateLotSize(const TradingSignal& signal) {
       finalLotSize = maxLot;
    }
 
+   // Calculate broker costs for the final lot size
+   if(AccountForBrokerCosts || AdjustTargetForCosts) {
+      // Get spread and commission
+      double spreadPoints = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+      double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
+      
+      // Use configured commission rates
+      if(isXAUUSD) {
+         commissionPerLot = GoldCommissionPerLot;
+      } else {
+         commissionPerLot = ForexCommissionPerLot;
+      }
+      
+      // Convert commission to account currency if needed
+      if(accountCurrency != "USD") {
+         string conversionPair1 = "USD" + accountCurrency;
+         string conversionPair2 = accountCurrency + "USD";
+         
+         if(SymbolSelect(conversionPair1, true)) {
+            double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
+            if(rate > 0) commissionPerLot *= rate;
+         } else if(SymbolSelect(conversionPair2, true)) {
+            double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+            if(rate > 0) commissionPerLot /= rate;
+         }
+      }
+      
+      spreadCostPerLot = spreadInPips * pipValueInAccountCurrency;
+      totalCostPerLot = spreadCostPerLot + commissionPerLot;
+   }
+   
    // Calculate actual risk with final lot size (including broker costs if enabled)
    double stopRiskAmount = finalLotSize * stopDistancePips * pipValueInAccountCurrency;
    double brokerCostsAmount = 0;
    double actualRiskAmount = stopRiskAmount;
    
-   if(AccountForBrokerCosts) {
+   if(AccountForBrokerCosts || AdjustTargetForCosts) {
       brokerCostsAmount = finalLotSize * totalCostPerLot;
       actualRiskAmount = stopRiskAmount + brokerCostsAmount;
    }
@@ -1216,7 +1255,7 @@ double CalculateLotSize(const TradingSignal& signal) {
    Print("TradingSignalEA: ----------------------------------------");
    Print("TradingSignalEA: Final Lot Size: ", finalLotSize);
    Print("TradingSignalEA: Stop Loss Risk: ", accountCurrency, " ", stopRiskAmount);
-   if(AccountForBrokerCosts) {
+   if(AccountForBrokerCosts || AdjustTargetForCosts) {
       Print("TradingSignalEA: Broker Costs (", finalLotSize, " lots): ", accountCurrency, " ", brokerCostsAmount);
    }
    Print("TradingSignalEA: Total Actual Risk: ", accountCurrency, " ", actualRiskAmount);
@@ -1224,19 +1263,139 @@ double CalculateLotSize(const TradingSignal& signal) {
    Print("TradingSignalEA: Risk Deviation: ", riskDeviation, "%");
    Print("TradingSignalEA: ========================================");
    
-   // Warn if risk deviation is significant
-   if(MathAbs(riskDeviation) > 15.0) {
+   // Warn if risk deviation is significant (only if we're NOT adjusting target to compensate)
+   if(!AdjustTargetForCosts && MathAbs(riskDeviation) > 15.0) {
       Print("TradingSignalEA: WARNING - Risk deviation exceeds 15% (", riskDeviation, "%)");
       Print("TradingSignalEA: This may be due to broker lot size constraints");
    }
    
    // Reject trade if risk is more than 50% higher than target (safety check)
-   if(actualRiskAmount > targetRiskAmount * 1.5) {
+   // Exception: if we're adjusting target, we'll compensate for this
+   if(!AdjustTargetForCosts && actualRiskAmount > targetRiskAmount * 1.5) {
       Print("TradingSignalEA: ERROR - Actual risk (", actualRiskAmount, ") exceeds target by >50%. Trade rejected for safety.");
       return 0;
    }
    
    return finalLotSize;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate adjusted target price to compensate for broker costs   |
+//+------------------------------------------------------------------+
+double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
+   if(!AdjustTargetForCosts || !AccountForBrokerCosts) {
+      return signal.target;  // No adjustment needed
+   }
+   
+   string accountCurrency = AccountInfoString(ACCOUNT_CURRENCY);
+   
+   // Identify symbol type
+   bool isXAUUSD = (signal.symbol == "XAUUSD" || signal.symbol == "XAGUSD");
+   bool isJPY = (StringFind(signal.symbol, "JPY") >= 0);
+   
+   // Define pip size based on symbol type
+   double pipSize = 0;
+   if(isXAUUSD) {
+      pipSize = 0.10;  // For Gold
+   } else if(isJPY) {
+      pipSize = 0.01;  // For JPY pairs
+   } else {
+      pipSize = 0.0001;  // For standard pairs
+   }
+   
+   // Calculate pip value per lot
+   double pipValuePerLot = 0;
+   double contractSize = 100000.0;
+   
+   if(isXAUUSD) {
+      pipValuePerLot = 10.0;  // $10 per pip for XAUUSD
+   } else if(isJPY) {
+      double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
+      if(currentPrice > 0) {
+         pipValuePerLot = (contractSize * pipSize) / currentPrice;
+      }
+   } else {
+      pipValuePerLot = contractSize * pipSize;
+   }
+   
+   // Convert pip value to account currency if needed
+   double pipValueInAccountCurrency = pipValuePerLot;
+   string quoteCurrency = StringSubstr(signal.symbol, 3, 3);
+   
+   if(accountCurrency != quoteCurrency && !isXAUUSD) {
+      string conversionPair1 = quoteCurrency + accountCurrency;
+      string conversionPair2 = accountCurrency + quoteCurrency;
+      
+      if(SymbolSelect(conversionPair1, true)) {
+         double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
+         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot * rate;
+      } else if(SymbolSelect(conversionPair2, true)) {
+         double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot / rate;
+      }
+   } else if(isXAUUSD && accountCurrency != "USD") {
+      string conversionPair1 = "USD" + accountCurrency;
+      string conversionPair2 = accountCurrency + "USD";
+      
+      if(SymbolSelect(conversionPair1, true)) {
+         double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
+         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot * rate;
+      } else if(SymbolSelect(conversionPair2, true)) {
+         double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot / rate;
+      }
+   }
+   
+   // Calculate broker costs per lot
+   double spreadPoints = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+   double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
+   
+   double commissionPerLot = isXAUUSD ? GoldCommissionPerLot : ForexCommissionPerLot;
+   
+   // Convert commission to account currency if needed
+   if(accountCurrency != "USD") {
+      string conversionPair1 = "USD" + accountCurrency;
+      string conversionPair2 = accountCurrency + "USD";
+      
+      if(SymbolSelect(conversionPair1, true)) {
+         double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
+         if(rate > 0) commissionPerLot *= rate;
+      } else if(SymbolSelect(conversionPair2, true)) {
+         double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+         if(rate > 0) commissionPerLot /= rate;
+      }
+   }
+   
+   double spreadCostPerLot = spreadInPips * pipValueInAccountCurrency;
+   double totalCostPerLot = spreadCostPerLot + commissionPerLot;
+   
+   // Calculate total broker costs for the position
+   double totalBrokerCosts = lotSize * totalCostPerLot;
+   
+   // Convert broker costs to pips that need to be added to the target
+   double additionalPipsNeeded = totalBrokerCosts / (lotSize * pipValueInAccountCurrency);
+   
+   // Adjust target price to compensate for broker costs
+   double adjustedTarget = 0;
+   if(signal.action == ORDER_TYPE_BUY) {
+      // For BUY: target is above entry, add more pips
+      adjustedTarget = signal.target + (additionalPipsNeeded * pipSize);
+   } else {
+      // For SELL: target is below entry, subtract more pips (move target further down)
+      adjustedTarget = signal.target - (additionalPipsNeeded * pipSize);
+   }
+   
+   Print("TradingSignalEA: ========================================");
+   Print("TradingSignalEA: TARGET ADJUSTMENT FOR BROKER COSTS");
+   Print("TradingSignalEA: ----------------------------------------");
+   Print("TradingSignalEA: Original Target: ", signal.target);
+   Print("TradingSignalEA: Total Broker Costs: ", accountCurrency, " ", totalBrokerCosts);
+   Print("TradingSignalEA: Additional Pips Needed: ", additionalPipsNeeded);
+   Print("TradingSignalEA: Adjusted Target: ", adjustedTarget);
+   Print("TradingSignalEA: Target Adjustment: ", (adjustedTarget - signal.target), " (", additionalPipsNeeded, " pips)");
+   Print("TradingSignalEA: ========================================");
+   
+   return adjustedTarget;
 }
 
 //+------------------------------------------------------------------+
@@ -1306,8 +1465,10 @@ bool ExecuteTrade(const TradingSignal& signal) {
       request.sl = (signal.action == ORDER_TYPE_BUY) ? (signal.stop - slBuffer) : (signal.stop + slBuffer);
    }
    if(UseTakeProfit && signal.target > 0) {
+      // Calculate adjusted target if enabled (to compensate for broker costs)
+      double finalTarget = CalculateAdjustedTarget(signal, lotSize);
       double tpBuffer = point * 2;
-      request.tp = (signal.action == ORDER_TYPE_BUY) ? (signal.target - tpBuffer) : (signal.target + tpBuffer);
+      request.tp = (signal.action == ORDER_TYPE_BUY) ? (finalTarget - tpBuffer) : (finalTarget + tpBuffer);
    }
 
    MqlTradeResult result = {};

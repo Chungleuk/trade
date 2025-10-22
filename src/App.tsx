@@ -51,14 +51,22 @@ function App() {
   };
 
   const handleDeleteAlert = async (alertId: string) => {
+    console.log('handleDeleteAlert called with alertId:', alertId);
+    console.log('Current alerts count:', alerts.length);
+    console.log('deleteAlert function available:', !!deleteAlert);
+    
     if (window.confirm('Are you sure you want to delete this alert?')) {
+      console.log('User confirmed deletion');
       const success = await deleteAlert(alertId);
+      console.log('Delete result:', success);
       if (success) {
         showNotification('Alert deleted successfully', 'success');
         setAnalyticsRefreshTrigger(prev => prev + 1); // Trigger analytics refresh
       } else {
         showNotification('Failed to delete alert', 'error');
       }
+    } else {
+      console.log('User cancelled deletion');
     }
   };
 

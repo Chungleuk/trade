@@ -370,15 +370,18 @@ export const AlertsList: React.FC<AlertsListProps> = ({
           ) : (
             <>
               <div className="p-4">
-                {currentAlerts.map((alert) => (
-                  <AlertCard 
-                    key={alert.id} 
-                    alert={alert} 
-                    onUpdateStatus={onUpdateStatus}
-                    onMarkOutcome={onMarkOutcome}
-                    onDelete={onDelete}
-                  />
-                ))}
+                {currentAlerts.map((alert) => {
+                  console.log('Rendering AlertCard for alert:', alert.id, 'onDelete available:', !!onDelete);
+                  return (
+                    <AlertCard 
+                      key={alert.id} 
+                      alert={alert} 
+                      onUpdateStatus={onUpdateStatus}
+                      onMarkOutcome={onMarkOutcome}
+                      onDelete={onDelete}
+                    />
+                  );
+                })}
               </div>
               <PaginationControls />
             </>

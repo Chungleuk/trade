@@ -259,14 +259,18 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
                     <>
                       <hr className="my-1" />
                       <button
-                        onClick={() => {
-                          console.log('Marking alert as breakeven, ID:', alert.id);
-                          console.log('Marking alert as loss, ID:', alert.id);
-                          console.log('Marking alert as win, ID:', alert.id);
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          console.log('Delete button clicked for alert ID:', alert.id);
+                          console.log('onDelete function available:', !!onDelete);
+                          console.log('Total alerts count:', 'checking...');
                           onDelete(alert.id);
                           setShowActions(false);
                         }}
-                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                        style={{ pointerEvents: 'auto' }}
+                        title="Delete this alert"
                       >
                         <Trash2 className="w-4 h-4" />
                         Delete Alert

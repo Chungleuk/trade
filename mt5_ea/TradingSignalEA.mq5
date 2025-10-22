@@ -35,6 +35,9 @@ input bool UseDynamicContractSize = false;
 input double BaseAccountSize = 10000.0;
 input double MaxContractSizeMultiplier = 5.0;
 input int NetworkStabilizationDelay = 300;
+input double ForexCommissionPerLot = 6.0;  // Commission per lot round trip for forex (USD)
+input double GoldCommissionPerLot = 2.0;   // Commission per lot round trip for XAUUSD (USD)
+input bool AccountForBrokerCosts = true;   // Include commission and spread in risk calculation
 
 //--- Global variables
 datetime lastPollTime = 0;
@@ -1118,11 +1121,61 @@ double CalculateLotSize(const TradingSignal& signal) {
    
    Print("TradingSignalEA: Pip value in ", accountCurrency, ": ", pipValueInAccountCurrency);
 
-   // Calculate required lot size
-   // Formula: Lot Size = Target Risk / (Stop Distance in Pips * Pip Value per Lot)
-   double calculatedLotSize = targetRiskAmount / (stopDistancePips * pipValueInAccountCurrency);
+   // Get broker costs (commission and spread) if enabled
+   double commissionPerLot = 0;
+   double spreadCostPerLot = 0;
+   double totalCostPerLot = 0;
+   double calculatedLotSize = 0;
    
-   Print("TradingSignalEA: Calculated Lot Size: ", calculatedLotSize);
+   if(AccountForBrokerCosts) {
+      double spreadPoints = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+      double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
+      
+      // Use configured commission rates
+      if(isXAUUSD) {
+         commissionPerLot = GoldCommissionPerLot;
+      } else {
+         commissionPerLot = ForexCommissionPerLot;
+      }
+      
+      // Convert commission to account currency if needed
+      if(accountCurrency != "USD") {
+         // Commission is typically in USD, need to convert
+         string conversionPair1 = "USD" + accountCurrency;
+         string conversionPair2 = accountCurrency + "USD";
+         
+         if(SymbolSelect(conversionPair1, true)) {
+            double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
+            if(rate > 0) commissionPerLot *= rate;
+         } else if(SymbolSelect(conversionPair2, true)) {
+            double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+            if(rate > 0) commissionPerLot /= rate;
+         }
+      }
+      
+      // Total cost per lot = spread cost + commission
+      spreadCostPerLot = spreadInPips * pipValueInAccountCurrency;
+      totalCostPerLot = spreadCostPerLot + commissionPerLot;
+      
+      Print("TradingSignalEA: Spread: ", spreadPoints, " points (", spreadInPips, " pips)");
+      Print("TradingSignalEA: Spread Cost per Lot: ", accountCurrency, " ", spreadCostPerLot);
+      Print("TradingSignalEA: Commission per Lot: ", accountCurrency, " ", commissionPerLot);
+      Print("TradingSignalEA: Total Broker Cost per Lot: ", accountCurrency, " ", totalCostPerLot);
+      
+      // Adjusted formula: Account for costs in lot size calculation
+      // Total Risk = (Stop Distance * Pip Value * Lot Size) + (Broker Costs * Lot Size)
+      // Lot Size = Total Risk / (Stop Distance * Pip Value + Broker Costs)
+      double effectiveRiskPerLot = (stopDistancePips * pipValueInAccountCurrency) + totalCostPerLot;
+      calculatedLotSize = targetRiskAmount / effectiveRiskPerLot;
+      
+      Print("TradingSignalEA: Stop Risk per Lot: ", accountCurrency, " ", stopDistancePips * pipValueInAccountCurrency);
+      Print("TradingSignalEA: Effective Risk per Lot (with costs): ", accountCurrency, " ", effectiveRiskPerLot);
+      Print("TradingSignalEA: Calculated Lot Size (accounting for costs): ", calculatedLotSize);
+   } else {
+      // Original formula without broker costs
+      calculatedLotSize = targetRiskAmount / (stopDistancePips * pipValueInAccountCurrency);
+      Print("TradingSignalEA: Calculated Lot Size (NO cost adjustment): ", calculatedLotSize);
+   }
 
    // Apply broker constraints
    double minLot = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_MIN);
@@ -1146,14 +1199,28 @@ double CalculateLotSize(const TradingSignal& signal) {
       finalLotSize = maxLot;
    }
 
-   // Calculate actual risk with final lot size
-   double actualRiskAmount = finalLotSize * stopDistancePips * pipValueInAccountCurrency;
+   // Calculate actual risk with final lot size (including broker costs if enabled)
+   double stopRiskAmount = finalLotSize * stopDistancePips * pipValueInAccountCurrency;
+   double brokerCostsAmount = 0;
+   double actualRiskAmount = stopRiskAmount;
+   
+   if(AccountForBrokerCosts) {
+      brokerCostsAmount = finalLotSize * totalCostPerLot;
+      actualRiskAmount = stopRiskAmount + brokerCostsAmount;
+   }
+   
    double riskDeviation = ((actualRiskAmount - targetRiskAmount) / targetRiskAmount) * 100.0;
    
+   Print("TradingSignalEA: ========================================");
+   Print("TradingSignalEA: FINAL RISK SUMMARY");
    Print("TradingSignalEA: ----------------------------------------");
    Print("TradingSignalEA: Final Lot Size: ", finalLotSize);
-   Print("TradingSignalEA: Actual Risk Amount: ", accountCurrency, " ", actualRiskAmount);
-   Print("TradingSignalEA: Target Risk Amount: ", accountCurrency, " ", targetRiskAmount);
+   Print("TradingSignalEA: Stop Loss Risk: ", accountCurrency, " ", stopRiskAmount);
+   if(AccountForBrokerCosts) {
+      Print("TradingSignalEA: Broker Costs (", finalLotSize, " lots): ", accountCurrency, " ", brokerCostsAmount);
+   }
+   Print("TradingSignalEA: Total Actual Risk: ", accountCurrency, " ", actualRiskAmount);
+   Print("TradingSignalEA: Target Risk: ", accountCurrency, " ", targetRiskAmount);
    Print("TradingSignalEA: Risk Deviation: ", riskDeviation, "%");
    Print("TradingSignalEA: ========================================");
    

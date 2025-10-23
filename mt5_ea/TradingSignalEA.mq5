@@ -38,8 +38,8 @@ input double MaxContractSizeMultiplier = 5.0;
 input int NetworkStabilizationDelay = 300;
 input double ForexCommissionPerLot = 6.0;  // Commission per lot round trip for forex (USD)
 input double GoldCommissionPerLot = 2.0;   // Commission per lot round trip for XAUUSD (USD)
-input bool AccountForBrokerCosts = true;   // Include commission and spread in risk calculation
-input bool AdjustTargetForCosts = false;   // Adjust TP target instead of reducing lot size
+input bool AccountForBrokerCosts = true;   // Include commission and spread in calculations
+input bool AdjustTargetForCosts = true;    // Adjust TP to maintain 1:1 R:R after costs (RECOMMENDED)
 
 //--- Global variables
 datetime lastPollTime = 0;
@@ -1565,14 +1565,15 @@ bool ExecuteTrade(const TradingSignal& signal) {
    request.comment = "Signal: " + signal.id + " | Risk: " + DoubleToString(signal.risk_percent, 2) + "%";
    
    if(UseStopLoss && signal.stop > 0) {
-      double slBuffer = point * 2;
-      request.sl = (signal.action == ORDER_TYPE_BUY) ? (signal.stop - slBuffer) : (signal.stop + slBuffer);
+      // Use EXACT stop loss from signal - NO BUFFER
+      request.sl = signal.stop;
    }
    if(UseTakeProfit && signal.target > 0) {
       // Calculate adjusted target if enabled (to compensate for broker costs)
+      // This extends TP to maintain 1:1 R:R after commission/spread
       double finalTarget = CalculateAdjustedTarget(signal, lotSize);
-      double tpBuffer = point * 2;
-      request.tp = (signal.action == ORDER_TYPE_BUY) ? (finalTarget - tpBuffer) : (finalTarget + tpBuffer);
+      // Use EXACT target - NO BUFFER (target is already adjusted for costs if enabled)
+      request.tp = finalTarget;
    }
    
    MqlTradeResult result = {};

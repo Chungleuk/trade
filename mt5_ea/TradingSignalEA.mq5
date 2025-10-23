@@ -31,8 +31,9 @@ input double BaseMaxSlippagePips = 3.0;
 input double VolatileSymbolSlippageMultiplier = 1.5;
 input bool AllowCriticalSignalOverride = true;
 input double CriticalSignalMaxExtraPips = 1.0;
-input bool UseDynamicContractSize = false;  // true = use current balance, false = use BaseAccountSize
-input double BaseAccountSize = 100000.0;  // Fixed account size for consistent position sizing
+input bool UseDynamicContractSize = false;  // true = use current balance, false = use initial deposit
+input bool UseManualBaseSize = false;  // true = use ManualBaseAccountSize, false = auto-detect initial deposit
+input double ManualBaseAccountSize = 100000.0;  // Manual base size (only if UseManualBaseSize = true)
 input double MaxContractSizeMultiplier = 5.0;
 input int NetworkStabilizationDelay = 300;
 input double ForexCommissionPerLot = 6.0;  // Commission per lot round trip for forex (USD)
@@ -51,6 +52,7 @@ datetime lastTradeCheck = 0;
 int hkTimeCheckInterval = 300;
 datetime lastHKTimeCheck = 0;
 datetime lastNetworkIssue = 0;
+double initialAccountBalance = 0;  // Stores the initial deposit/balance for fixed position sizing
 
 string processedSignals[];
 int processedSignalsCount = 0;
@@ -297,6 +299,14 @@ int OnInit() {
       Print("TradingSignalEA: FATAL - Trading is disabled. Fix settings and restart.");
       return INIT_FAILED;
    }
+
+   // Capture initial account balance for fixed position sizing
+   initialAccountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   Print("TradingSignalEA: ========================================");
+   Print("TradingSignalEA: INITIAL ACCOUNT BALANCE CAPTURED");
+   Print("TradingSignalEA: Initial Balance: ", AccountInfoString(ACCOUNT_CURRENCY), " ", initialAccountBalance);
+   Print("TradingSignalEA: This will be used for fixed position sizing");
+   Print("TradingSignalEA: ========================================");
 
    connectionManager.SetState(CONNECTED);
    lastSuccessfulPoll = TimeGMT();
@@ -984,11 +994,26 @@ double CalculateLotSize(const TradingSignal& signal) {
    // Determine which balance to use for risk calculation
    double balance = actualBalance;
    
-   if(!UseDynamicContractSize && BaseAccountSize > 0) {
-      // Use fixed base account size for consistent position sizing
-      balance = BaseAccountSize;
-      Print("TradingSignalEA: Using FIXED base account size: ", accountCurrency, " ", balance, 
-            " (Actual balance: ", accountCurrency, " ", actualBalance, ")");
+   if(!UseDynamicContractSize) {
+      // Use fixed sizing (not dynamic)
+      if(UseManualBaseSize) {
+         // Manual mode: use configured ManualBaseAccountSize
+         balance = ManualBaseAccountSize;
+         Print("TradingSignalEA: Using MANUAL base account size: ", accountCurrency, " ", balance, 
+               " (Actual balance: ", accountCurrency, " ", actualBalance, ")");
+      } else {
+         // Auto mode: use initial account balance captured at EA start
+         if(initialAccountBalance > 0) {
+            balance = initialAccountBalance;
+            Print("TradingSignalEA: Using INITIAL DEPOSIT: ", accountCurrency, " ", balance, 
+                  " (Actual balance: ", accountCurrency, " ", actualBalance, ")");
+         } else {
+            // Fallback if initial balance not captured (shouldn't happen)
+            balance = actualBalance;
+            Print("TradingSignalEA: WARNING - Initial balance not captured, using current balance: ", 
+                  accountCurrency, " ", balance);
+         }
+      }
    } else {
       // Use current account balance (dynamic sizing)
       Print("TradingSignalEA: Using DYNAMIC account balance: ", accountCurrency, " ", balance);

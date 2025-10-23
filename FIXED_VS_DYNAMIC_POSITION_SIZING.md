@@ -2,17 +2,26 @@
 
 ## Overview
 The EA supports two methods for calculating lot sizes based on account balance:
-1. **Fixed Position Sizing** (Default, Recommended)
+1. **Fixed Position Sizing** (Default, Recommended) - **AUTO-DETECTS INITIAL DEPOSIT!** ✨
 2. **Dynamic Position Sizing**
 
 ---
 
 ## Method 1: Fixed Position Sizing (RECOMMENDED) ✅
 
-### Settings:
+### Settings (AUTO MODE - DEFAULT):
 ```mql5
-input bool UseDynamicContractSize = false;  // Use fixed base
-input double BaseAccountSize = 100000.0;    // Your starting capital
+input bool UseDynamicContractSize = false;  // Use fixed sizing
+input bool UseManualBaseSize = false;       // Auto-detect initial deposit
+```
+
+**The EA automatically captures your initial account balance when first loaded!**
+
+### Settings (MANUAL MODE):
+```mql5
+input bool UseDynamicContractSize = false;  // Use fixed sizing
+input bool UseManualBaseSize = true;        // Use manual base size
+input double ManualBaseAccountSize = 100000.0;  // Your starting capital
 ```
 
 ### How It Works:
@@ -20,8 +29,8 @@ input double BaseAccountSize = 100000.0;    // Your starting capital
 - Lot sizes remain **consistent** regardless of profit/loss
 - Your risk per trade stays proportional to your **starting capital**
 
-### Example:
-**Initial Capital: $100,000**
+### Example (AUTO MODE):
+**Initial Deposit: $100,000** (captured when EA starts)
 **Risk: 0.83% per trade = $830**
 
 | Current Balance | Risk Calculation | Lot Size (USDJPY) |
@@ -30,6 +39,11 @@ input double BaseAccountSize = 100000.0;    // Your starting capital
 | $103,560 (profit) | $100,000 × 0.83% = $830 | 9.01 lots ✓ |
 | $110,000 (profit) | $100,000 × 0.83% = $830 | 9.01 lots ✓ |
 | $95,000 (loss) | $100,000 × 0.83% = $830 | 9.01 lots ✓ |
+
+**How It Captures Initial Balance:**
+- When you first attach the EA to the chart, it saves the current balance
+- This becomes your "initial deposit" for all future calculations
+- Even if you remove and re-add the EA, it will capture the balance at that moment
 
 **Benefits:**
 - ✅ Consistent position sizing

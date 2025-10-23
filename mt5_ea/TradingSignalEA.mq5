@@ -896,14 +896,14 @@ bool ProcessSignal(const TradingSignal& signal) {
          AddActiveSymbol(signal.symbol);
          currentlyProcessingSignal = "";
          signalProcessingStartTime = 0;
-         return true;
-      } else {
+      return true;
+   } else {
          Print("TradingSignalEA: Trade execution failed for signal: ", signal.id);
          SendSignalAck(signal.id, "failed", "Trade execution failed");
          AddSignalToRetryList(signal.id);
          currentlyProcessingSignal = "";
          signalProcessingStartTime = 0;
-         return false;
+      return false;
       }
    } else {
       Print("TradingSignalEA: Signal received (auto-execute disabled): ", signal.id);
@@ -1109,38 +1109,59 @@ double CalculateLotSize(const TradingSignal& signal) {
    // Now convert to account currency if needed
    if(accountCurrency != pipValueCurrency) {
       // Need to convert from pipValueCurrency to account currency
-      string conversionPair1 = pipValueCurrency + accountCurrency;  // e.g., USDEUR
-      string conversionPair2 = accountCurrency + pipValueCurrency;  // e.g., EURUSD
+      string conversionPair1 = pipValueCurrency + accountCurrency;  // e.g., GBPUSD (if GBP->USD)
+      string conversionPair2 = accountCurrency + pipValueCurrency;  // e.g., USDCHF (if CHF->USD)
       
       double conversionRate = 0;
       bool conversionDone = false;
       
-      // Try first format (USDEUR)
+      Print("TradingSignalEA: Need to convert ", pipValueCurrency, " to ", accountCurrency);
+      Print("TradingSignalEA: Trying conversion pair: ", conversionPair1);
+      
+      // Try first format: pipValueCurrency + accountCurrency (e.g., GBPUSD)
+      // In this case, we MULTIPLY (rate shows how many USD per GBP)
       if(SymbolSelect(conversionPair1, true)) {
          conversionRate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
          if(conversionRate > 0) {
             pipValueInAccountCurrency = pipValuePerLot * conversionRate;
-            Print("TradingSignalEA: Converted using ", conversionPair1, " rate: ", conversionRate);
+            Print("TradingSignalEA: ✓ Found ", conversionPair1, " = ", conversionRate);
+            Print("TradingSignalEA: ✓ Conversion: ", pipValuePerLot, " ", pipValueCurrency, 
+                  " × ", conversionRate, " = ", pipValueInAccountCurrency, " ", accountCurrency);
             conversionDone = true;
          }
       }
       
-      // Try second format (EURUSD)
-      if(!conversionDone && SymbolSelect(conversionPair2, true)) {
-         conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
-         if(conversionRate > 0) {
-            pipValueInAccountCurrency = pipValuePerLot / conversionRate;
-            Print("TradingSignalEA: Converted using ", conversionPair2, " rate: ", conversionRate);
-            conversionDone = true;
+      // Try second format: accountCurrency + pipValueCurrency (e.g., USDCHF)
+      // In this case, we DIVIDE (rate shows how many CHF per USD, so we need reciprocal)
+      if(!conversionDone) {
+         Print("TradingSignalEA: Trying conversion pair: ", conversionPair2);
+         if(SymbolSelect(conversionPair2, true)) {
+            conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+            if(conversionRate > 0) {
+               pipValueInAccountCurrency = pipValuePerLot / conversionRate;
+               Print("TradingSignalEA: ✓ Found ", conversionPair2, " = ", conversionRate);
+               Print("TradingSignalEA: ✓ Conversion: ", pipValuePerLot, " ", pipValueCurrency, 
+                     " ÷ ", conversionRate, " = ", pipValueInAccountCurrency, " ", accountCurrency);
+               conversionDone = true;
+            }
          }
       }
       
       if(!conversionDone) {
-         Print("TradingSignalEA: WARNING - Cannot find conversion rate from ", pipValueCurrency, " to ", accountCurrency);
-         Print("TradingSignalEA: Assuming 1:1 conversion (may be inaccurate)");
+         Print("TradingSignalEA: ========================================");
+         Print("TradingSignalEA: ERROR - Cannot find conversion rate!");
+         Print("TradingSignalEA: ----------------------------------------");
+         Print("TradingSignalEA: Need to convert: ", pipValueCurrency, " → ", accountCurrency);
+         Print("TradingSignalEA: Tried: ", conversionPair1, " (not available)");
+         Print("TradingSignalEA: Tried: ", conversionPair2, " (not available)");
+         Print("TradingSignalEA: ----------------------------------------");
+         Print("TradingSignalEA: WARNING: Using 1:1 conversion (INACCURATE!)");
+         Print("TradingSignalEA: This will cause INCORRECT lot size calculation!");
+         Print("TradingSignalEA: Please ensure broker provides these conversion pairs.");
+         Print("TradingSignalEA: ========================================");
       }
    } else {
-      Print("TradingSignalEA: No conversion needed - pip value already in ", accountCurrency);
+      Print("TradingSignalEA: ✓ No conversion needed - pip value already in ", accountCurrency);
    }
    
    Print("TradingSignalEA: Final pip value in ", accountCurrency, ": ", pipValueInAccountCurrency);
@@ -1153,7 +1174,8 @@ double CalculateLotSize(const TradingSignal& signal) {
    
    if(AccountForBrokerCosts && !AdjustTargetForCosts) {
       // METHOD 1: Reduce lot size to account for broker costs
-      double spreadPoints = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+      long spreadPointsLong = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+      double spreadPoints = (double)spreadPointsLong;
       double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
       
       // Use configured commission rates
@@ -1233,7 +1255,8 @@ double CalculateLotSize(const TradingSignal& signal) {
    // Calculate broker costs for the final lot size
    if(AccountForBrokerCosts || AdjustTargetForCosts) {
       // Get spread and commission
-      double spreadPoints = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+      long spreadPointsLong = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+      double spreadPoints = (double)spreadPointsLong;
       double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
       
       // Use configured commission rates
@@ -1340,7 +1363,7 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
          // For JPY pairs where JPY is quote (USDJPY, EURJPY), pip value is in base currency
          pipValuePerLot = (contractSize * pipSize) / currentPrice;
       }
-   } else {
+      } else {
       pipValuePerLot = contractSize * pipSize;
    }
    
@@ -1362,18 +1385,35 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
    if(accountCurrency != pipValueCurrency) {
       string conversionPair1 = pipValueCurrency + accountCurrency;
       string conversionPair2 = accountCurrency + pipValueCurrency;
+      bool conversionDone = false;
       
+      // Try first format (multiply)
       if(SymbolSelect(conversionPair1, true)) {
          double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
-         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot * rate;
-      } else if(SymbolSelect(conversionPair2, true)) {
+         if(rate > 0) {
+            pipValueInAccountCurrency = pipValuePerLot * rate;
+            conversionDone = true;
+         }
+      }
+      
+      // Try second format (divide)
+      if(!conversionDone && SymbolSelect(conversionPair2, true)) {
          double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
-         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot / rate;
+         if(rate > 0) {
+            pipValueInAccountCurrency = pipValuePerLot / rate;
+            conversionDone = true;
+         }
+      }
+      
+      if(!conversionDone) {
+         Print("TradingSignalEA: WARNING - CalculateAdjustedTarget: Cannot convert ", 
+               pipValueCurrency, " to ", accountCurrency, " - using 1:1");
       }
    }
    
    // Calculate broker costs per lot
-   double spreadPoints = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+   long spreadPointsLong = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
+   double spreadPoints = (double)spreadPointsLong;
    double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
    
    double commissionPerLot = isXAUUSD ? GoldCommissionPerLot : ForexCommissionPerLot;
@@ -1456,7 +1496,7 @@ bool ExecuteTrade(const TradingSignal& signal) {
       Print("TradingSignalEA: Invalid lot size calculated: ", lotSize);
       return false;
    }
-
+   
    double currentPrice = (signal.action == ORDER_TYPE_BUY) 
       ? SymbolInfoDouble(signal.symbol, SYMBOL_ASK) 
       : SymbolInfoDouble(signal.symbol, SYMBOL_BID);
@@ -1485,7 +1525,7 @@ bool ExecuteTrade(const TradingSignal& signal) {
    request.deviation = (uint)(maxSlippage * 10);
    request.magic = MagicNumber;
    request.comment = "Signal: " + signal.id + " | Risk: " + DoubleToString(signal.risk_percent, 2) + "%";
-
+   
    if(UseStopLoss && signal.stop > 0) {
       double slBuffer = point * 2;
       request.sl = (signal.action == ORDER_TYPE_BUY) ? (signal.stop - slBuffer) : (signal.stop + slBuffer);
@@ -1496,7 +1536,7 @@ bool ExecuteTrade(const TradingSignal& signal) {
       double tpBuffer = point * 2;
       request.tp = (signal.action == ORDER_TYPE_BUY) ? (finalTarget - tpBuffer) : (finalTarget + tpBuffer);
    }
-
+   
    MqlTradeResult result = {};
    if(!OrderSend(request, result)) {
       int errorCode = GetLastError();
@@ -1504,13 +1544,13 @@ bool ExecuteTrade(const TradingSignal& signal) {
             " | Symbol: ", signal.symbol, " | Price: ", currentPrice);
       return false;
    }
-
+   
    if(result.retcode != TRADE_RETCODE_DONE) {
       Print("TradingSignalEA: Execution failed - Code: ", result.retcode, 
             " | Expected Price: ", currentPrice, " | Actual Price: ", result.price);
       return false;
    }
-
+   
    Print("TradingSignalEA: Trade executed - Ticket: ", result.order,
          " | Symbol: ", signal.symbol, " | Price: ", result.price, " | Lot: ", lotSize,
          " | Risk: ", signal.risk_percent, "%");

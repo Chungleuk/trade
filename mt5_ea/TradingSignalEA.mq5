@@ -31,8 +31,8 @@ input double BaseMaxSlippagePips = 3.0;
 input double VolatileSymbolSlippageMultiplier = 1.5;
 input bool AllowCriticalSignalOverride = true;
 input double CriticalSignalMaxExtraPips = 1.0;
-input bool UseDynamicContractSize = false;
-input double BaseAccountSize = 10000.0;
+input bool UseDynamicContractSize = false;  // true = use current balance, false = use BaseAccountSize
+input double BaseAccountSize = 100000.0;  // Fixed account size for consistent position sizing
 input double MaxContractSizeMultiplier = 5.0;
 input int NetworkStabilizationDelay = 300;
 input double ForexCommissionPerLot = 6.0;  // Commission per lot round trip for forex (USD)
@@ -973,19 +973,32 @@ bool ValidateSignal(const TradingSignal& signal) {
 //| FIXED VERSION - Accurate for XAUUSD, EURUSD, USDJPY, GBPUSD, etc |
 //+------------------------------------------------------------------+
 double CalculateLotSize(const TradingSignal& signal) {
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double actualBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    string accountCurrency = AccountInfoString(ACCOUNT_CURRENCY);
    
-   if(balance <= 0) {
-      Print("TradingSignalEA: ERROR - Invalid balance: ", balance);
+   if(actualBalance <= 0) {
+      Print("TradingSignalEA: ERROR - Invalid balance: ", actualBalance);
       return 0;
+   }
+
+   // Determine which balance to use for risk calculation
+   double balance = actualBalance;
+   
+   if(!UseDynamicContractSize && BaseAccountSize > 0) {
+      // Use fixed base account size for consistent position sizing
+      balance = BaseAccountSize;
+      Print("TradingSignalEA: Using FIXED base account size: ", accountCurrency, " ", balance, 
+            " (Actual balance: ", accountCurrency, " ", actualBalance, ")");
+   } else {
+      // Use current account balance (dynamic sizing)
+      Print("TradingSignalEA: Using DYNAMIC account balance: ", accountCurrency, " ", balance);
    }
 
    // Calculate target risk amount in account currency
    double targetRiskAmount = balance * (signal.risk_percent / 100.0);
    Print("TradingSignalEA: ========================================");
    Print("TradingSignalEA: RISK CALCULATION FOR ", signal.symbol);
-   Print("TradingSignalEA: Account Balance: ", accountCurrency, " ", balance);
+   Print("TradingSignalEA: Account Balance (for calculation): ", accountCurrency, " ", balance);
    Print("TradingSignalEA: Risk Percentage: ", signal.risk_percent, "%");
    Print("TradingSignalEA: Target Risk Amount: ", accountCurrency, " ", targetRiskAmount);
 

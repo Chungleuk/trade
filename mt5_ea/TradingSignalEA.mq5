@@ -98,7 +98,7 @@ struct TradingSignal {
    datetime receive_time;
    double risk_percent;
    bool is_critical;
-
+   
    TradingSignal() {
       id = "";
       symbol = "";
@@ -115,7 +115,7 @@ struct TradingSignal {
       risk_percent = 0.65;
       is_critical = false;
    }
-
+   
    TradingSignal(const TradingSignal& other) {
       id = other.id;
       symbol = other.symbol;
@@ -138,38 +138,38 @@ class SignalQueue {
 private:
    TradingSignal signals[];
    int queueSize;
-
+   
 public:
    SignalQueue() {
       queueSize = 0;
       ArrayResize(signals, 0);
    }
-
+   
    void AddSignal(const TradingSignal& signal) {
       ArrayResize(signals, queueSize + 1);
       signals[queueSize] = signal;
       queueSize++;
       Print("TradingSignalEA: Signal added to queue. Queue size: ", queueSize);
    }
-
+   
    bool ProcessNextSignal() {
       if(queueSize == 0) return false;
-
+      
       TradingSignal signal = signals[0];
-
+      
       for(int i = 0; i < queueSize - 1; i++) {
          signals[i] = signals[i + 1];
       }
       queueSize--;
       ArrayResize(signals, queueSize);
-
+      
       return ProcessSignal(signal);
    }
-
+   
    int GetQueueSize() const {
       return queueSize;
    }
-
+   
    void ClearQueue() {
       queueSize = 0;
       ArrayResize(signals, 0);
@@ -183,7 +183,7 @@ class ErrorHandler {
 public:
    static bool HandleWebRequestError(int httpCode, string operation) {
       switch(httpCode) {
-         case -1:
+         case -1: 
             Print("TradingSignalEA: Network error in ", operation, " - check internet connection");
             return false;
          case 0:
@@ -211,7 +211,7 @@ public:
             return (httpCode >= 500);
       }
    }
-
+   
    static void LogError(string operation, string details) {
       Print("TradingSignalEA: ERROR in ", operation, " - ", details);
    }
@@ -222,33 +222,33 @@ private:
    ConnectionState state;
    datetime lastHeartbeat;
    int heartbeatInterval;
-
+   
 public:
    ConnectionManager() {
       state = DISCONNECTED;
       lastHeartbeat = 0;
       heartbeatInterval = 15;
    }
-
+   
    void SetState(ConnectionState newState) {
       if(state != newState) {
          Print("TradingSignalEA: Connection state changed from ", EnumToString(state), " to ", EnumToString(newState));
          state = newState;
       }
    }
-
+   
    ConnectionState GetState() const {
       return state;
    }
-
+   
    bool IsConnected() const {
       return (state == CONNECTED);
    }
-
+   
    bool IsHealthy() const {
       return (state == CONNECTED && consecutiveFailures < maxConsecutiveFailures);
    }
-
+   
    void UpdateConnectionHealth(bool success) {
       if(success) {
          consecutiveFailures = 0;
@@ -265,15 +265,15 @@ public:
          }
       }
    }
-
+   
    bool ShouldSendHeartbeat() {
       return (TimeGMT() - lastHeartbeat >= heartbeatInterval);
    }
-
+   
    void UpdateHeartbeat() {
       lastHeartbeat = TimeGMT();
    }
-
+   
    string GetStateString() const {
       switch(state) {
          case DISCONNECTED: return "Disconnected";
@@ -292,7 +292,7 @@ ConnectionManager connectionManager;
 //+------------------------------------------------------------------+
 int OnInit() {
    Print("TradingSignalEA: Initializing...");
-
+   
    if(!IsTradingEnabled()) {
       Print("TradingSignalEA: FATAL - Trading is disabled. Fix settings and restart.");
       return INIT_FAILED;
@@ -300,13 +300,13 @@ int OnInit() {
 
    connectionManager.SetState(CONNECTED);
    lastSuccessfulPoll = TimeGMT();
-
+   
    if(TestConnection()) {
       Print("TradingSignalEA: Server connection test successful");
    } else {
       Print("TradingSignalEA: Warning - Server connection test failed. Will retry on timer.");
    }
-
+   
    EventSetMillisecondTimer(100);
    UpdateActiveSymbols();
    Print("TradingSignalEA: Found ", activeSymbolsCount, " symbols with active positions");
@@ -355,7 +355,7 @@ void OnTimer() {
       }
       return;
    }
-
+   
    if(currentlyProcessingSignal != "" && (TimeGMT() - signalProcessingStartTime) > 10) {
       Print("TradingSignalEA: Signal processing timeout for signal: ", currentlyProcessingSignal);
       currentlyProcessingSignal = "";
@@ -364,22 +364,22 @@ void OnTimer() {
 
    if(TimeGMT() - lastPollTime >= PollInterval/1000) {
       bool shouldPoll = true;
-
+      
       if(currentlyProcessingSignal != "") {
          Print("TradingSignalEA: Currently processing signal ", currentlyProcessingSignal, " - skipping poll");
          shouldPoll = false;
       }
-
+      
       if(IsSymbolActive(Symbol())) {
          Print("TradingSignalEA: Current symbol ", Symbol(), " has active trade - skipping poll");
          shouldPoll = false;
       }
-
+      
       if(PositionsTotal() >= 5) {
          Print("TradingSignalEA: Maximum concurrent positions reached - skipping poll");
          shouldPoll = false;
       }
-
+      
       if(shouldPoll) {
          if(UseGETMethod) {
             PollForSignalsGET();
@@ -389,22 +389,22 @@ void OnTimer() {
       }
       lastPollTime = TimeGMT();
    }
-
+   
    if(connectionManager.ShouldSendHeartbeat()) {
       SendHeartbeat();
       connectionManager.UpdateHeartbeat();
    }
-
+   
    if(signalQueue.GetQueueSize() > 0) {
       signalQueue.ProcessNextSignal();
    }
-
+   
    if(TimeGMT() - lastTradeCheck >= tradeCheckInterval) {
       CheckAndUpdateTradeOutcomes();
       UpdateActiveSymbols();
       lastTradeCheck = TimeGMT();
    }
-
+   
    if(TimeGMT() - lastHKTimeCheck >= hkTimeCheckInterval) {
       if(IsHKShutdownTime()) {
          Print("TradingSignalEA: Hong Kong shutdown time (4:00 AM) detected - closing all trades");
@@ -488,12 +488,12 @@ bool TestConnection() {
    uchar postData[];
    uchar response[];
    string responseHeaders;
-
+   
    string testUrl = ServerURL + "/status";
    Print("TradingSignalEA: Testing connection to: ", testUrl);
-
+   
    int result = WebRequest("GET", testUrl, headers, 5000, postData, response, responseHeaders);
-
+   
    if(result == 200) {
       string responseStr = CharArrayToString(response);
       Print("TradingSignalEA: Connection test successful. Response: ", responseStr);
@@ -513,16 +513,16 @@ bool TestConnection() {
 //+------------------------------------------------------------------+
 void PollForSignals() {
    Print("TradingSignalEA: Polling for signals (POST method)...");
-
+   
    long account = AccountInfoInteger(ACCOUNT_LOGIN);
    string symbol = Symbol();
    int timeframe = Period();
-
+   
    Print("TradingSignalEA: Poll Variables - Account: ", account, ", Symbol: ", symbol, ", Timeframe: ", timeframe);
-
+   
    if(symbol == "" || symbol == "unknown") symbol = "XAUUSD";
    if(timeframe <= 0) timeframe = 15;
-
+   
    string url = ServerURL + "/signals/pending";
    string postDataStr = StringFormat(
       "{\"terminal\":\"MT5\",\"account\":%d,\"symbol\":\"%s\",\"timeframe\":%d}",
@@ -530,21 +530,21 @@ void PollForSignals() {
       symbol,
       timeframe
    );
-
+   
    string headers = GenerateHeaders("POST");
    if(DebugMode) {
-      Print("TradingSignalEA: POST Headers:\n", headers);
-      Print("TradingSignalEA: POST Body: ", postDataStr);
+   Print("TradingSignalEA: POST Headers:\n", headers);
+   Print("TradingSignalEA: POST Body: ", postDataStr);
    }
-
+   
    uchar postData[];
    int arraySize = StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
    if(DebugMode) Print("TradingSignalEA: POST Body Size: ", arraySize, " bytes");
-
+   
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
-
+   
    if(result == 200) {
       string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
       if(DebugMode) Print("TradingSignalEA: Poll Success - Response: ", responseStr);
@@ -609,7 +609,7 @@ void ProcessSignalsResponse(const string response) {
                ProcessSingleSignal(signal);
             }
          }
-      } else {
+   } else {
          Print("TradingSignalEA: No signals found in response");
       }
    }
@@ -641,7 +641,7 @@ bool ParseSignalData(const string signalData, TradingSignal& signal) {
       signal.action = ORDER_TYPE_BUY;
    } else if(actionStr == "SELL") {
       signal.action = ORDER_TYPE_SELL;
-   } else {
+      } else {
       Print("TradingSignalEA: WARNING - Unknown action: ", actionStr);
    }
 
@@ -733,7 +733,7 @@ bool ParseSignalData(const string signalData, TradingSignal& signal) {
       return false;
    }
 
-   return true;
+      return true;
 }
 
 //+------------------------------------------------------------------+
@@ -778,7 +778,7 @@ string ExtractJsonValue(const string json, const string key) {
          if(DebugMode) Print("TradingSignalEA: Extracted quoted value for ", key, ": ", result);
          return result;
       }
-   } else {
+               } else {
       // Value is not quoted - extract until comma, bracket, or brace
       int valueEnd = valueStart;
       while(valueEnd < StringLen(json)) {
@@ -817,31 +817,31 @@ void ProcessSingleSignal(const TradingSignal &signal) {
       return;
    }
 
-   if(IsSignalAlreadyProcessed(signal.id)) {
-      Print("TradingSignalEA: Duplicate signal detected: ", signal.id, " - skipping");
-      return;
-   }
-
-   if(currentlyProcessingSignal == signal.id) {
-      Print("TradingSignalEA: Signal ", signal.id, " is currently being processed - skipping");
-      return;
-   }
-
-   if(HasOpenPosition(signal.symbol)) {
-      Print("TradingSignalEA: Position already exists for ", signal.symbol, " - skipping signal: ", signal.id);
-      return;
-   }
-
-   if(IsSymbolActive(signal.symbol)) {
-      Print("TradingSignalEA: Symbol ", signal.symbol, " already has active trade - skipping signal: ", signal.id);
-      return;
-   }
-
+            if(IsSignalAlreadyProcessed(signal.id)) {
+               Print("TradingSignalEA: Duplicate signal detected: ", signal.id, " - skipping");
+               return;
+            }
+            
+            if(currentlyProcessingSignal == signal.id) {
+               Print("TradingSignalEA: Signal ", signal.id, " is currently being processed - skipping");
+               return;
+            }
+            
+            if(HasOpenPosition(signal.symbol)) {
+               Print("TradingSignalEA: Position already exists for ", signal.symbol, " - skipping signal: ", signal.id);
+               return;
+            }
+            
+            if(IsSymbolActive(signal.symbol)) {
+               Print("TradingSignalEA: Symbol ", signal.symbol, " already has active trade - skipping signal: ", signal.id);
+               return;
+            }
+            
    if(signal.id != "") {
-      currentlyProcessingSignal = signal.id;
+               currentlyProcessingSignal = signal.id;
       signalProcessingStartTime = TimeGMT();
-      MarkSignalAsProcessed(signal.id);
-      signalQueue.AddSignal(signal);
+               MarkSignalAsProcessed(signal.id);
+               signalQueue.AddSignal(signal);
       Print("TradingSignalEA: Signal queued: ", signal.id, " for ", signal.symbol,
             " with ", signal.risk_percent, "% risk");
    }
@@ -879,7 +879,7 @@ bool ProcessSignal(const TradingSignal& signal) {
    } else if(isExpired && isWithinGracePeriod) {
       Print("TradingSignalEA: Signal ", signal.id, " is expired but within grace period - attempting execution");
    }
-
+   
    if(!ValidateSignal(signal)) {
       Print("TradingSignalEA: Signal validation failed");
       SendSignalAck(signal.id, "failed", "Signal validation failed");
@@ -888,7 +888,7 @@ bool ProcessSignal(const TradingSignal& signal) {
       signalProcessingStartTime = 0;
       return false;
    }
-
+   
    if(AutoExecute) {
       if(ExecuteTrade(signal)) {
          Print("TradingSignalEA: Trade executed successfully for signal: ", signal.id);
@@ -944,17 +944,17 @@ bool ValidateSignal(const TradingSignal& signal) {
       Print("TradingSignalEA: Symbol not found: ", signal.symbol);
       return false;
    }
-
+   
    if(signal.entry <= 0) {
       Print("TradingSignalEA: Invalid entry price: ", signal.entry);
       return false;
    }
-
+   
    if(signal.target != 0 && signal.target <= 0) {
       Print("TradingSignalEA: Invalid target price: ", signal.target);
       return false;
    }
-
+   
    if(signal.stop != 0 && signal.stop <= 0) {
       Print("TradingSignalEA: Invalid stop loss: ", signal.stop);
       return false;
@@ -964,7 +964,7 @@ bool ValidateSignal(const TradingSignal& signal) {
       Print("TradingSignalEA: Invalid risk percentage: ", signal.risk_percent);
       return false;
    }
-
+   
    return true;
 }
 
@@ -1086,22 +1086,34 @@ double CalculateLotSize(const TradingSignal& signal) {
    double pipValueInAccountCurrency = pipValuePerLot;
    
    // Determine what currency the pip value is currently in
-   string pipValueCurrency = quoteCurrency;
+   string pipValueCurrency;
    
-   // Special case for JPY pairs: if JPY is quote, pip value was already converted to base currency
-   if(isJPY && baseCurrency != "JPY") {
+   if(isXAUUSD) {
+      // XAUUSD is always quoted in USD
+      pipValueCurrency = "USD";
+      Print("TradingSignalEA: XAUUSD - pip value is in USD");
+   } else if(isJPY && baseCurrency != "JPY") {
       // For USDJPY, EURJPY, etc., the pip value is already in the base currency (USD, EUR, etc.)
+      // because the formula (contractSize * pipSize) / currentPrice converts JPY to base currency
       pipValueCurrency = baseCurrency;
       Print("TradingSignalEA: JPY pair - pip value is in base currency: ", baseCurrency);
+      } else {
+      // For standard pairs, pip value is in the quote currency
+      pipValueCurrency = quoteCurrency;
+      Print("TradingSignalEA: Standard pair - pip value is in quote currency: ", quoteCurrency);
    }
    
+   Print("TradingSignalEA: Pip value before conversion: ", pipValuePerLot, " ", pipValueCurrency);
+   Print("TradingSignalEA: Account currency: ", accountCurrency);
+   
    // Now convert to account currency if needed
-   if(accountCurrency != pipValueCurrency && !isXAUUSD) {
+   if(accountCurrency != pipValueCurrency) {
       // Need to convert from pipValueCurrency to account currency
       string conversionPair1 = pipValueCurrency + accountCurrency;  // e.g., USDEUR
       string conversionPair2 = accountCurrency + pipValueCurrency;  // e.g., EURUSD
       
       double conversionRate = 0;
+      bool conversionDone = false;
       
       // Try first format (USDEUR)
       if(SymbolSelect(conversionPair1, true)) {
@@ -1109,44 +1121,29 @@ double CalculateLotSize(const TradingSignal& signal) {
          if(conversionRate > 0) {
             pipValueInAccountCurrency = pipValuePerLot * conversionRate;
             Print("TradingSignalEA: Converted using ", conversionPair1, " rate: ", conversionRate);
+            conversionDone = true;
          }
       }
+      
       // Try second format (EURUSD)
-      else if(SymbolSelect(conversionPair2, true)) {
+      if(!conversionDone && SymbolSelect(conversionPair2, true)) {
          conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
          if(conversionRate > 0) {
             pipValueInAccountCurrency = pipValuePerLot / conversionRate;
             Print("TradingSignalEA: Converted using ", conversionPair2, " rate: ", conversionRate);
+            conversionDone = true;
          }
-      } else {
+      }
+      
+      if(!conversionDone) {
          Print("TradingSignalEA: WARNING - Cannot find conversion rate from ", pipValueCurrency, " to ", accountCurrency);
          Print("TradingSignalEA: Assuming 1:1 conversion (may be inaccurate)");
       }
-   } else if(accountCurrency == pipValueCurrency) {
+   } else {
       Print("TradingSignalEA: No conversion needed - pip value already in ", accountCurrency);
-   } else if(isXAUUSD && accountCurrency != "USD") {
-      // XAUUSD is quoted in USD, convert to account currency
-      string conversionPair1 = "USD" + accountCurrency;
-      string conversionPair2 = accountCurrency + "USD";
-      
-      double conversionRate = 0;
-      
-      if(SymbolSelect(conversionPair1, true)) {
-         conversionRate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
-         if(conversionRate > 0) {
-            pipValueInAccountCurrency = pipValuePerLot * conversionRate;
-            Print("TradingSignalEA: XAUUSD converted using ", conversionPair1, " rate: ", conversionRate);
-         }
-      } else if(SymbolSelect(conversionPair2, true)) {
-         conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
-         if(conversionRate > 0) {
-            pipValueInAccountCurrency = pipValuePerLot / conversionRate;
-            Print("TradingSignalEA: XAUUSD converted using ", conversionPair2, " rate: ", conversionRate);
-         }
-      }
    }
    
-   Print("TradingSignalEA: Pip value in ", accountCurrency, ": ", pipValueInAccountCurrency);
+   Print("TradingSignalEA: Final pip value in ", accountCurrency, ": ", pipValueInAccountCurrency);
 
    // Get broker costs (commission and spread) if enabled
    double commissionPerLot = 0;
@@ -1351,28 +1348,20 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
    double pipValueInAccountCurrency = pipValuePerLot;
    
    // Determine what currency the pip value is currently in
-   string pipValueCurrency = quoteCurrency;
+   string pipValueCurrency;
    
-   // Special case for JPY pairs: if JPY is quote, pip value was already converted to base currency
-   if(isJPY && baseCurrency != "JPY") {
+   if(isXAUUSD) {
+      pipValueCurrency = "USD";
+   } else if(isJPY && baseCurrency != "JPY") {
       pipValueCurrency = baseCurrency;
+   } else {
+      pipValueCurrency = quoteCurrency;
    }
    
    // Now convert to account currency if needed
-   if(accountCurrency != pipValueCurrency && !isXAUUSD) {
+   if(accountCurrency != pipValueCurrency) {
       string conversionPair1 = pipValueCurrency + accountCurrency;
       string conversionPair2 = accountCurrency + pipValueCurrency;
-      
-      if(SymbolSelect(conversionPair1, true)) {
-         double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
-         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot * rate;
-      } else if(SymbolSelect(conversionPair2, true)) {
-         double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
-         if(rate > 0) pipValueInAccountCurrency = pipValuePerLot / rate;
-      }
-   } else if(isXAUUSD && accountCurrency != "USD") {
-      string conversionPair1 = "USD" + accountCurrency;
-      string conversionPair2 = accountCurrency + "USD";
       
       if(SymbolSelect(conversionPair1, true)) {
          double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
@@ -1539,14 +1528,14 @@ bool SendConnectionMessage() {
       TerminalInfoString(TERMINAL_NAME)
    );
    string headers = GenerateHeaders("POST");
-
+   
    uchar postData[];
    StringToCharArray(postDataStr, postData);
-
+   
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
-
+   
    if(result == 200) {
       Print("TradingSignalEA: Connection message sent successfully");
       return true;
@@ -1564,10 +1553,10 @@ void SendDisconnectMessage() {
       AccountInfoInteger(ACCOUNT_LOGIN)
    );
    string headers = GenerateHeaders("POST");
-
+   
    uchar postData[];
    StringToCharArray(postDataStr, postData);
-
+   
    uchar response[];
    string responseHeaders;
    WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
@@ -1580,14 +1569,14 @@ void SendHeartbeat() {
       (int)AccountInfoInteger(ACCOUNT_LOGIN)
    );
    string headers = GenerateHeaders("POST");
-
+   
    uchar postData[];
    StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
-
+   
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
-
+   
    if(result == 200) {
       Print("TradingSignalEA: Heartbeat successful");
       connectionManager.UpdateConnectionHealth(true);
@@ -1603,10 +1592,10 @@ void SendHeartbeat() {
 
 void SendSignalAck(const string signalId, const string status, const string message) {
    Print("TradingSignalEA: Sending signal ack - ID: ", signalId, ", Status: ", status);
-
+   
    string url = ServerURL + "/signals/ack";
    string headers = GenerateHeaders("POST");
-
+   
    string postDataStr = StringFormat(
       "{\"type\":\"signal_ack\",\"signalId\":\"%s\",\"status\":\"%s\",\"message\":\"%s\",\"account\":%d}",
       signalId,
@@ -1614,14 +1603,14 @@ void SendSignalAck(const string signalId, const string status, const string mess
       message,
       (int)AccountInfoInteger(ACCOUNT_LOGIN)
    );
-
+   
    uchar postData[];
    StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
-
+   
    uchar response[];
    string responseHeaders;
    int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
-
+   
    if(result == 200) {
       Print("TradingSignalEA: Signal ack sent successfully - ID: ", signalId);
    } else {
@@ -1840,11 +1829,11 @@ void CheckAndUpdateTradeOutcomes() {
             ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
             if(dealType == DEAL_TYPE_SELL || dealType == DEAL_TYPE_BUY) {
                ulong positionTicket = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
-
+               
                if(!IsTradeOutcomeProcessed(positionTicket)) {
                   double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
                   string outcome = (profit > 0) ? "win" : "loss";
-
+                  
                   if(UpdateTradeOutcome(positionTicket, outcome)) {
                      MarkTradeOutcomeProcessed(positionTicket);
                      Print("TradingSignalEA: Trade outcome updated - Ticket: ", positionTicket, ", Outcome: ", outcome, ", Profit: ", profit);
@@ -1873,18 +1862,18 @@ bool IsSignalAlreadyProcessed(const string& signalId) {
 //+------------------------------------------------------------------+
 void MarkSignalAsProcessed(const string& signalId) {
    if(!IsSignalAlreadyProcessed(signalId)) {
-      ArrayResize(processedSignals, processedSignalsCount + 1);
-      processedSignals[processedSignalsCount] = signalId;
-      processedSignalsCount++;
-      Print("TradingSignalEA: Signal ", signalId, " marked as processed (Total processed: ", processedSignalsCount, ")");
-
-      if(processedSignalsCount > 100) {
-         for(int i = 0; i < 50; i++) {
-            processedSignals[i] = processedSignals[i + 50];
-         }
-         processedSignalsCount = 50;
-         ArrayResize(processedSignals, 50);
-         Print("TradingSignalEA: Cleaned up old processed signals");
+   ArrayResize(processedSignals, processedSignalsCount + 1);
+   processedSignals[processedSignalsCount] = signalId;
+   processedSignalsCount++;
+   Print("TradingSignalEA: Signal ", signalId, " marked as processed (Total processed: ", processedSignalsCount, ")");
+   
+   if(processedSignalsCount > 100) {
+      for(int i = 0; i < 50; i++) {
+         processedSignals[i] = processedSignals[i + 50];
+      }
+      processedSignalsCount = 50;
+      ArrayResize(processedSignals, 50);
+      Print("TradingSignalEA: Cleaned up old processed signals");
       }
    }
 }
@@ -1982,7 +1971,7 @@ void AddActiveSymbol(const string& symbol) {
          return;
       }
    }
-
+   
    ArrayResize(activeSymbols, activeSymbolsCount + 1);
    activeSymbols[activeSymbolsCount] = symbol;
    activeSymbolsCount++;
@@ -2024,7 +2013,7 @@ bool IsSymbolActive(const string& symbol) {
 void UpdateActiveSymbols() {
    activeSymbolsCount = 0;
    ArrayResize(activeSymbols, 0);
-
+   
    for(int i = 0; i < PositionsTotal(); i++) {
       if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
          string symbol = PositionGetSymbol(i);

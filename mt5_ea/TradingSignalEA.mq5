@@ -1047,16 +1047,29 @@ double CalculateLotSize(const TradingSignal& signal) {
       pipValuePerLot = 10.0;  // $10 per pip for 1 lot XAUUSD
       Print("TradingSignalEA: XAUUSD - Pip value per lot: $", pipValuePerLot);
    } else if(isJPY) {
-      // JPY pairs: pip value = (contract size * pip size) / current price
-      // Example: USDJPY at 150.00: (100,000 * 0.01) / 150.00 = 6.67 USD per pip
+      // JPY pairs: pip value calculation depends on which currency is JPY
       double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
       if(currentPrice <= 0) {
          Print("TradingSignalEA: ERROR - Invalid current price for ", signal.symbol);
          return 0;
       }
-      pipValuePerLot = (contractSize * pipSize) / currentPrice;
+      
+      // For pairs like USDJPY (USD is base, JPY is quote):
+      // 1 lot = 100,000 USD, 1 pip = 0.01 movement
+      // Pip value in JPY = 100,000 * 0.01 = 1,000 JPY
+      // Pip value in USD = 1,000 / current_price
+      if(baseCurrency != "JPY") {
+         // JPY is quote currency (e.g., USDJPY, EURJPY)
+         // Pip value in quote currency (JPY), need to convert to base
+         pipValuePerLot = (contractSize * pipSize) / currentPrice;
+      } else {
+         // JPY is base currency (e.g., JPYUSD - rare)
+         pipValuePerLot = contractSize * pipSize;
+      }
+      
       Print("TradingSignalEA: JPY Pair - Current price: ", currentPrice);
-      Print("TradingSignalEA: JPY Pair - Pip value per lot: $", pipValuePerLot);
+      Print("TradingSignalEA: JPY Pair - Base: ", baseCurrency, ", Quote: ", quoteCurrency);
+      Print("TradingSignalEA: JPY Pair - Pip value per lot: ", pipValuePerLot);
    } else {
       // Standard forex pairs: pip value = contract size * pip size
       // Example: EURUSD: 100,000 * 0.0001 = 10 USD per pip (if quote is USD)
@@ -1072,10 +1085,21 @@ double CalculateLotSize(const TradingSignal& signal) {
    // Convert pip value to account currency if needed
    double pipValueInAccountCurrency = pipValuePerLot;
    
-   if(accountCurrency != quoteCurrency && !isXAUUSD) {
-      // Need to convert from quote currency to account currency
-      string conversionPair1 = quoteCurrency + accountCurrency;  // e.g., USDEUR
-      string conversionPair2 = accountCurrency + quoteCurrency;  // e.g., EURUSD
+   // Determine what currency the pip value is currently in
+   string pipValueCurrency = quoteCurrency;
+   
+   // Special case for JPY pairs: if JPY is quote, pip value was already converted to base currency
+   if(isJPY && baseCurrency != "JPY") {
+      // For USDJPY, EURJPY, etc., the pip value is already in the base currency (USD, EUR, etc.)
+      pipValueCurrency = baseCurrency;
+      Print("TradingSignalEA: JPY pair - pip value is in base currency: ", baseCurrency);
+   }
+   
+   // Now convert to account currency if needed
+   if(accountCurrency != pipValueCurrency && !isXAUUSD) {
+      // Need to convert from pipValueCurrency to account currency
+      string conversionPair1 = pipValueCurrency + accountCurrency;  // e.g., USDEUR
+      string conversionPair2 = accountCurrency + pipValueCurrency;  // e.g., EURUSD
       
       double conversionRate = 0;
       
@@ -1095,9 +1119,11 @@ double CalculateLotSize(const TradingSignal& signal) {
             Print("TradingSignalEA: Converted using ", conversionPair2, " rate: ", conversionRate);
          }
       } else {
-         Print("TradingSignalEA: WARNING - Cannot find conversion rate from ", quoteCurrency, " to ", accountCurrency);
+         Print("TradingSignalEA: WARNING - Cannot find conversion rate from ", pipValueCurrency, " to ", accountCurrency);
          Print("TradingSignalEA: Assuming 1:1 conversion (may be inaccurate)");
       }
+   } else if(accountCurrency == pipValueCurrency) {
+      Print("TradingSignalEA: No conversion needed - pip value already in ", accountCurrency);
    } else if(isXAUUSD && accountCurrency != "USD") {
       // XAUUSD is quoted in USD, convert to account currency
       string conversionPair1 = "USD" + accountCurrency;
@@ -1306,12 +1332,15 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
    // Calculate pip value per lot
    double pipValuePerLot = 0;
    double contractSize = 100000.0;
+   string baseCurrency = StringSubstr(signal.symbol, 0, 3);
+   string quoteCurrency = StringSubstr(signal.symbol, 3, 3);
    
    if(isXAUUSD) {
       pipValuePerLot = 10.0;  // $10 per pip for XAUUSD
    } else if(isJPY) {
       double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
       if(currentPrice > 0) {
+         // For JPY pairs where JPY is quote (USDJPY, EURJPY), pip value is in base currency
          pipValuePerLot = (contractSize * pipSize) / currentPrice;
       }
    } else {
@@ -1320,11 +1349,19 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
    
    // Convert pip value to account currency if needed
    double pipValueInAccountCurrency = pipValuePerLot;
-   string quoteCurrency = StringSubstr(signal.symbol, 3, 3);
    
-   if(accountCurrency != quoteCurrency && !isXAUUSD) {
-      string conversionPair1 = quoteCurrency + accountCurrency;
-      string conversionPair2 = accountCurrency + quoteCurrency;
+   // Determine what currency the pip value is currently in
+   string pipValueCurrency = quoteCurrency;
+   
+   // Special case for JPY pairs: if JPY is quote, pip value was already converted to base currency
+   if(isJPY && baseCurrency != "JPY") {
+      pipValueCurrency = baseCurrency;
+   }
+   
+   // Now convert to account currency if needed
+   if(accountCurrency != pipValueCurrency && !isXAUUSD) {
+      string conversionPair1 = pipValueCurrency + accountCurrency;
+      string conversionPair2 = accountCurrency + pipValueCurrency;
       
       if(SymbolSelect(conversionPair1, true)) {
          double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);

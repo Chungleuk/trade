@@ -21,7 +21,8 @@
     "redis": "^4.6.10",
     "winston": "^3.11.0",
     "express-rate-limit": "^7.1.5",
-    "crypto": "^1.0.1"
+    "crypto": "^1.0.1",
+    "@supabase/supabase-js": "^2.39.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2",

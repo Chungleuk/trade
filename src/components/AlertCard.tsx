@@ -1,7 +1,6 @@
 import React from 'react';
 import { TrendingUp, TrendingDown, Clock, Target, Shield, DollarSign, MoreVertical, CheckCircle, XCircle, Trash2, Trophy, TrendingDown as LossIcon, Minus } from 'lucide-react';
 import { TradingAlert } from '../types/alert';
-import { AIAnalysisCard } from './AIAnalysisCard';
 
 interface AlertCardProps {
   alert: TradingAlert;
@@ -12,7 +11,6 @@ interface AlertCardProps {
 
 export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onMarkOutcome, onDelete }) => {
   const [showActions, setShowActions] = React.useState(false);
-  const [showAIAnalysis, setShowAIAnalysis] = React.useState(false);
   const isBuy = alert.action === 'BUY';
   const actionColor = isBuy ? 'text-green-600' : 'text-red-600';
   const outcomeBorderColor = alert.outcome === 'win'
@@ -307,18 +305,6 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
         </div>
       )}
 
-      {/* AI Analysis */}
-      {alert.aiAnalysis && (
-        <div className="mt-4">
-          <AIAnalysisCard
-            analysis={alert.aiAnalysis}
-            alertSymbol={alert.symbol}
-            alertAction={alert.action}
-            isExpanded={showAIAnalysis}
-            onToggleExpand={() => setShowAIAnalysis(!showAIAnalysis)}
-          />
-        </div>
-      )}
       
       {/* Click outside to close actions menu */}
       {showActions && (

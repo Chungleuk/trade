@@ -1,5 +1,3 @@
-import { AnalysisResult } from '../services/openaiAnalysisService';
-
 export interface TradingAlert {
   id: string;
   action: 'BUY' | 'SELL';
@@ -16,9 +14,10 @@ export interface TradingAlert {
   message?: string;
   rawMessage?: string; // Store the original TradingView message
   strategyName?: string; // Extract strategy name if available
-  aiAnalysis?: AnalysisResult; // AI analysis results
-  analysisPerformed?: boolean; // Whether AI analysis has been performed
-  analysisTimestamp?: string; // When AI analysis was performed
+  // AI analysis fields removed - no longer used
+  aiAnalysis?: any; // Legacy field - kept for backward compatibility with existing data
+  analysisPerformed?: boolean; // Legacy field - kept for backward compatibility
+  analysisTimestamp?: string; // Legacy field - kept for backward compatibility
 }
 
 export interface WebhookConfig {

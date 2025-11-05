@@ -2,8 +2,14 @@ import express from 'express';
 import crypto from 'crypto';
 import { logger } from '../utils/logger.js';
 import { signalQueue } from '../server.js';
+import { EmailService } from '../services/emailService.js';
+import { SupabaseService } from '../services/supabaseService.js';
 
 const router = express.Router();
+
+// Initialize services
+const emailService = new EmailService();
+const supabaseService = new SupabaseService();
 
 // Webhook secret for validation
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'tradingview-webhook-secret';
@@ -50,7 +56,7 @@ const validateWebhook = (req, res, next) => {
   next();
 };
 
-// POST /api/webhook/tradingview
+// POST /api/webhook/tradingview - Complete webhook handler (replaces Supabase Edge Function)
 router.post('/tradingview', validateWebhook, async (req, res) => {
   try {
     const signalData = req.body;
@@ -67,19 +73,53 @@ router.post('/tradingview', validateWebhook, async (req, res) => {
         missing: missingFields 
       });
     }
-    
-    // Generate unique signal ID
-    const signalId = `tv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Prepare signal for processing
-    const signal = {
-      id: signalId,
+
+    // Parse risk percentage
+    let riskPercent = '0.65%';
+    if (signalData.risk) {
+      riskPercent = typeof signalData.risk === 'string' ? signalData.risk : `${signalData.risk}%`;
+    }
+
+    // Prepare alert data
+    const alertData = {
       action: signalData.action.toUpperCase(),
       symbol: signalData.symbol.toUpperCase(),
       entry: parseFloat(signalData.entry),
       target: signalData.target ? parseFloat(signalData.target) : null,
       stop: signalData.stop ? parseFloat(signalData.stop) : null,
       timeframe: signalData.timeframe || '15',
+      rr: signalData.rr || null,
+      risk: riskPercent,
+      rawMessage: JSON.stringify(signalData, null, 2)
+    };
+
+    // STEP 1: Save alert to Supabase (if available)
+    let savedAlert = null;
+    if (supabaseService.isAvailable()) {
+      try {
+        savedAlert = await supabaseService.saveAlert(alertData);
+        logger.info('✅ Alert saved to Supabase', { id: savedAlert?.id });
+      } catch (dbError) {
+        logger.error('❌ Failed to save alert to Supabase:', dbError);
+        // Continue even if database save fails
+      }
+    }
+
+    // STEP 2: Send immediate email (first email)
+    try {
+      await emailService.sendImmediateAlert(alertData);
+      logger.info('✅ Immediate alert email sent');
+    } catch (emailError) {
+      logger.error('❌ Failed to send immediate email:', emailError);
+      // Continue even if email fails
+    }
+
+    // STEP 3: Generate unique signal ID and add to queue
+    const signalId = savedAlert?.id || `tv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    const signal = {
+      id: signalId,
+      ...alertData,
       source: 'tradingview',
       rawData: signalData,
       timestamp: new Date().toISOString()
@@ -87,17 +127,15 @@ router.post('/tradingview', validateWebhook, async (req, res) => {
     
     // Add to signal queue
     const result = await signalQueue.addSignal(signal);
-    
-    logger.info('Signal queued successfully', { 
-      signalId, 
-      jobId: result.jobId 
-    });
-    
+    logger.info('Signal queued successfully', { signalId, jobId: result.jobId });
+
+    // Return response immediately
     res.json({
       success: true,
-      message: 'Signal received and queued',
+      message: 'Alert received, saved, and email sent.',
       signalId,
-      jobId: result.jobId
+      jobId: result.jobId,
+      alertId: savedAlert?.id || null
     });
     
   } catch (error) {

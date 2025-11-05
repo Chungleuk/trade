@@ -26,7 +26,7 @@ input bool UseServerTimeForExpiration = true;
 input bool AutoShutdownEnabled = true;
 input int HKShutdownHour = 4;
 input int MaxRetryAttempts = 3;
-input int DuplicateCheckWindow = 300;
+input int DuplicateCheckWindow = 600;  // 10 minutes to prevent rapid re-execution of same symbol
 input double BaseMaxSlippagePips = 3.0;
 input double VolatileSymbolSlippageMultiplier = 1.5;
 input bool AllowCriticalSignalOverride = true;
@@ -40,6 +40,16 @@ input double ForexCommissionPerLot = 6.0;  // Commission per lot round trip for 
 input double GoldCommissionPerLot = 2.0;   // Commission per lot round trip for XAUUSD (USD)
 input bool AccountForBrokerCosts = true;   // Include commission and spread in calculations
 input bool AdjustTargetForCosts = true;    // Adjust TP to maintain 1:1 R:R after costs (RECOMMENDED)
+input bool ForceOneToOneRR = true;         // Force 1:1 R:R by adjusting target to match stop distance
+
+// Email notifications
+input bool SendEmailNotifications = true;
+input string EmailAddress = "leechungleuk@gmail.com";
+input bool SendOnTradeOpen = true;
+input bool SendOnTradeClose = true;
+input bool SendOnSignalAck = false;
+input bool SendOnConnectionStatus = true;
+input bool SendOnErrors = true;
 
 //--- Global variables
 datetime lastPollTime = 0;
@@ -58,9 +68,16 @@ string processedSignals[];
 int processedSignalsCount = 0;
 string currentlyProcessingSignal = "";
 datetime signalProcessingStartTime = 0;
+string globalSignalLock = "";
+datetime globalSignalLockTime = 0;
 
 string activeSymbols[];
 int activeSymbolsCount = 0;
+
+// Track last time a symbol was queued to enforce DuplicateCheckWindow
+string recentSymbols[];
+datetime recentSymbolsTimes[];
+int recentSymbolsCount = 0;
 
 struct SignalRetry {
    string signalId;
@@ -170,6 +187,13 @@ public:
    
    int GetQueueSize() const {
       return queueSize;
+   }
+
+   bool ContainsId(const string &id) const {
+      for(int i = 0; i < queueSize; i++) {
+         if(signals[i].id == id) return true;
+      }
+      return false;
    }
    
    void ClearQueue() {
@@ -305,7 +329,9 @@ int OnInit() {
    Print("TradingSignalEA: ========================================");
    Print("TradingSignalEA: INITIAL ACCOUNT BALANCE CAPTURED");
    Print("TradingSignalEA: Initial Balance: ", AccountInfoString(ACCOUNT_CURRENCY), " ", initialAccountBalance);
-   Print("TradingSignalEA: This will be used for fixed position sizing");
+   Print("TradingSignalEA: This will be used for FIXED position sizing");
+   Print("TradingSignalEA: Risk calculations will ALWAYS use this amount");
+   Print("TradingSignalEA: Current balance changes will NOT affect position sizing");
    Print("TradingSignalEA: ========================================");
 
    connectionManager.SetState(CONNECTED);
@@ -313,8 +339,10 @@ int OnInit() {
    
    if(TestConnection()) {
       Print("TradingSignalEA: Server connection test successful");
+    SendConnectionStatusEmail("CONNECTED", "EA initialized successfully");
    } else {
       Print("TradingSignalEA: Warning - Server connection test failed. Will retry on timer.");
+    SendConnectionStatusEmail("CONNECTION ISSUE", "Initial connection test failed");
    }
    
    EventSetMillisecondTimer(100);
@@ -332,6 +360,20 @@ void OnDeinit(const int reason) {
    EventKillTimer();
    SendDisconnectMessage();
    signalQueue.ClearQueue();
+  string reasonStr = "";
+  switch(reason) {
+    case REASON_PROGRAM: reasonStr = "EA removed from chart"; break;
+    case REASON_RECOMPILE: reasonStr = "EA recompiled"; break;
+    case REASON_CHARTCHANGE: reasonStr = "Chart symbol/timeframe changed"; break;
+    case REASON_CHARTCLOSE: reasonStr = "Chart closed"; break;
+    case REASON_PARAMETERS: reasonStr = "Input parameters changed"; break;
+    case REASON_ACCOUNT: reasonStr = "Account changed"; break;
+    case REASON_TEMPLATE: reasonStr = "Template applied"; break;
+    case REASON_INITFAILED: reasonStr = "EA initialization failed"; break;
+    case REASON_CLOSE: reasonStr = "Terminal closed"; break;
+    default: reasonStr = "Unknown reason"; break;
+  }
+  SendConnectionStatusEmail("DISCONNECTED", StringFormat("Reason: %s", reasonStr));
    Print("TradingSignalEA: Deinitialized");
 }
 
@@ -846,12 +888,65 @@ void ProcessSingleSignal(const TradingSignal &signal) {
                Print("TradingSignalEA: Symbol ", signal.symbol, " already has active trade - skipping signal: ", signal.id);
                return;
             }
+
+            // Enforce DuplicateCheckWindow per symbol (skip if same symbol recently queued)
+            for(int i = 0; i < recentSymbolsCount; i++) {
+               if(recentSymbols[i] == signal.symbol) {
+                  int delta = (int)(TimeGMT() - recentSymbolsTimes[i]);
+                  if(delta < DuplicateCheckWindow) {
+                     Print("TradingSignalEA: DuplicateCheckWindow active for ", signal.symbol, 
+                           " - last queued ", delta, "s ago (window: ", DuplicateCheckWindow, "s). Skipping.");
+                     return;
+                  }
+               }
+            }
             
    if(signal.id != "") {
-               currentlyProcessingSignal = signal.id;
+      // GLOBAL SIGNAL LOCK - prevents any signal processing during execution
+      if(globalSignalLock != "") {
+         int lockAge = (int)(TimeGMT() - globalSignalLockTime);
+         if(lockAge < 10) {
+            Print("TradingSignalEA: Global signal lock active (", globalSignalLock, ") - skipping ", signal.id);
+            return;
+         } else {
+            Print("TradingSignalEA: WARNING - Stale global lock detected, clearing");
+            globalSignalLock = "";
+         }
+      }
+      
+      // Extra duplicate guards
+      if(signalQueue.ContainsId(signal.id)) {
+         Print("TradingSignalEA: Signal ", signal.id, " already queued - skipping");
+         return;
+      }
+      
+      // Acquire global lock
+      globalSignalLock = signal.id;
+      globalSignalLockTime = TimeGMT();
+      
+      // Mark as processed BEFORE adding to queue to prevent duplicates
+      MarkSignalAsProcessed(signal.id);
+      currentlyProcessingSignal = signal.id;
       signalProcessingStartTime = TimeGMT();
-               MarkSignalAsProcessed(signal.id);
-               signalQueue.AddSignal(signal);
+      // Pre-lock symbol to prevent duplicate execution while queued
+      AddActiveSymbol(signal.symbol);
+      // Record last queued time for symbol
+      bool updated = false;
+      for(int i = 0; i < recentSymbolsCount; i++) {
+         if(recentSymbols[i] == signal.symbol) {
+            recentSymbolsTimes[i] = TimeGMT();
+            updated = true;
+            break;
+         }
+      }
+      if(!updated) {
+         ArrayResize(recentSymbols, recentSymbolsCount + 1);
+         ArrayResize(recentSymbolsTimes, recentSymbolsCount + 1);
+         recentSymbols[recentSymbolsCount] = signal.symbol;
+         recentSymbolsTimes[recentSymbolsCount] = TimeGMT();
+         recentSymbolsCount++;
+      }
+      signalQueue.AddSignal(signal);
       Print("TradingSignalEA: Signal queued: ", signal.id, " for ", signal.symbol,
             " with ", signal.risk_percent, "% risk");
    }
@@ -867,8 +962,11 @@ bool ProcessSignal(const TradingSignal& signal) {
    if(!IsTradingEnabled()) {
       Print("TradingSignalEA: Cannot process signal - trading is disabled");
       SendSignalAck(signal.id, "failed", "Trading disabled");
+      SendErrorEmail("Trading Disabled", "Cannot execute trades - check MT5 settings");
       currentlyProcessingSignal = "";
       signalProcessingStartTime = 0;
+      globalSignalLock = "";
+      globalSignalLockTime = 0;
       return false;
    }
 
@@ -885,6 +983,8 @@ bool ProcessSignal(const TradingSignal& signal) {
       SendSignalAck(signal.id, "expired", "Signal expired before execution");
       currentlyProcessingSignal = "";
       signalProcessingStartTime = 0;
+      globalSignalLock = "";
+      globalSignalLockTime = 0;
       return false;
    } else if(isExpired && isWithinGracePeriod) {
       Print("TradingSignalEA: Signal ", signal.id, " is expired but within grace period - attempting execution");
@@ -894,8 +994,11 @@ bool ProcessSignal(const TradingSignal& signal) {
       Print("TradingSignalEA: Signal validation failed");
       SendSignalAck(signal.id, "failed", "Signal validation failed");
       AddSignalToRetryList(signal.id);
+      RemoveActiveSymbol(signal.symbol);
       currentlyProcessingSignal = "";
       signalProcessingStartTime = 0;
+      globalSignalLock = "";
+      globalSignalLockTime = 0;
       return false;
    }
    
@@ -911,15 +1014,21 @@ bool ProcessSignal(const TradingSignal& signal) {
          Print("TradingSignalEA: Trade execution failed for signal: ", signal.id);
          SendSignalAck(signal.id, "failed", "Trade execution failed");
          AddSignalToRetryList(signal.id);
+         RemoveActiveSymbol(signal.symbol);
          currentlyProcessingSignal = "";
          signalProcessingStartTime = 0;
+         globalSignalLock = "";
+         globalSignalLockTime = 0;
       return false;
       }
    } else {
       Print("TradingSignalEA: Signal received (auto-execute disabled): ", signal.id);
       SendSignalAck(signal.id, "received", "Manual execution required");
+      RemoveActiveSymbol(signal.symbol);
       currentlyProcessingSignal = "";
       signalProcessingStartTime = 0;
+      globalSignalLock = "";
+      globalSignalLockTime = 0;
       return true;
    }
 }
@@ -980,7 +1089,7 @@ bool ValidateSignal(const TradingSignal& signal) {
 
 //+------------------------------------------------------------------+
 //| Calculate lot size based on signal-specific risk percentage      |
-//| FIXED VERSION - Accurate for XAUUSD, EURUSD, USDJPY, GBPUSD, etc |
+//| CORRECTED VERSION - Proper 1:1 R:R with accurate cost handling   |
 //+------------------------------------------------------------------+
 double CalculateLotSize(const TradingSignal& signal) {
    double actualBalance = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -988,6 +1097,7 @@ double CalculateLotSize(const TradingSignal& signal) {
    
    if(actualBalance <= 0) {
       Print("TradingSignalEA: ERROR - Invalid balance: ", actualBalance);
+    SendErrorEmail("Invalid Account Balance", StringFormat("Balance: %.2f - account may be unavailable", actualBalance));
       return 0;
    }
 
@@ -995,14 +1105,14 @@ double CalculateLotSize(const TradingSignal& signal) {
    double balance = actualBalance;
    
    if(!UseDynamicContractSize) {
-      // Use fixed sizing (not dynamic)
+      // Use fixed sizing (not dynamic) - ALWAYS use initial deposit for consistent risk
       if(UseManualBaseSize) {
          // Manual mode: use configured ManualBaseAccountSize
          balance = ManualBaseAccountSize;
          Print("TradingSignalEA: Using MANUAL base account size: ", accountCurrency, " ", balance, 
                " (Actual balance: ", accountCurrency, " ", actualBalance, ")");
       } else {
-         // Auto mode: use initial account balance captured at EA start
+         // Auto mode: ALWAYS use initial account balance captured at EA start
          if(initialAccountBalance > 0) {
             balance = initialAccountBalance;
             Print("TradingSignalEA: Using INITIAL DEPOSIT: ", accountCurrency, " ", balance, 
@@ -1015,8 +1125,9 @@ double CalculateLotSize(const TradingSignal& signal) {
          }
       }
    } else {
-      // Use current account balance (dynamic sizing)
+      // Use current account balance (dynamic sizing) - ONLY if explicitly enabled
       Print("TradingSignalEA: Using DYNAMIC account balance: ", accountCurrency, " ", balance);
+      Print("TradingSignalEA: WARNING - Dynamic sizing enabled, risk will change with account balance!");
    }
 
    // Calculate target risk amount in account currency
@@ -1044,7 +1155,8 @@ double CalculateLotSize(const TradingSignal& signal) {
       return 0;
    }
    
-   // Calculate price difference
+   // Calculate price difference using SIGNAL prices (not execution prices)
+   // This ensures consistent risk calculation regardless of execution slippage
    double priceDiff = (signal.action == ORDER_TYPE_BUY) 
        ? (signal.entry - signal.stop) 
        : (signal.stop - signal.entry);
@@ -1074,129 +1186,107 @@ double CalculateLotSize(const TradingSignal& signal) {
    Print("TradingSignalEA: Price Difference: ", priceDiff);
    Print("TradingSignalEA: Pip Size: ", pipSize);
    Print("TradingSignalEA: Stop Distance: ", stopDistancePips, " pips");
+   Print("TradingSignalEA: NOTE: Lot size calculated using SIGNAL prices, not execution prices");
 
-   // Calculate pip value in quote currency (for 1 standard lot)
-   double pipValuePerLot = 0;
-   double contractSize = 100000.0;  // Standard lot size for forex
+   // Calculate pip value in account currency using MT5's built-in functions
+   double pipValueInAccountCurrency = 0;
+   double tickValue = SymbolInfoDouble(signal.symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(signal.symbol, SYMBOL_TRADE_TICK_SIZE);
+   double point = SymbolInfoDouble(signal.symbol, SYMBOL_POINT);
    
-   if(isXAUUSD) {
-      // XAUUSD: 1 lot = 100 oz, 1 pip (0.10) = $10 per lot
-      contractSize = 100.0;
-      pipValuePerLot = 10.0;  // $10 per pip for 1 lot XAUUSD
-      Print("TradingSignalEA: XAUUSD - Pip value per lot: $", pipValuePerLot);
-   } else if(isJPY) {
-      // JPY pairs: pip value calculation depends on which currency is JPY
-      double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
-      if(currentPrice <= 0) {
-         Print("TradingSignalEA: ERROR - Invalid current price for ", signal.symbol);
-         return 0;
-      }
-      
-      // For pairs like USDJPY (USD is base, JPY is quote):
-      // 1 lot = 100,000 USD, 1 pip = 0.01 movement
-      // Pip value in JPY = 100,000 * 0.01 = 1,000 JPY
-      // Pip value in USD = 1,000 / current_price
-      if(baseCurrency != "JPY") {
-         // JPY is quote currency (e.g., USDJPY, EURJPY)
-         // Pip value in quote currency (JPY), need to convert to base
-         pipValuePerLot = (contractSize * pipSize) / currentPrice;
-      } else {
-         // JPY is base currency (e.g., JPYUSD - rare)
-         pipValuePerLot = contractSize * pipSize;
-      }
-      
-      Print("TradingSignalEA: JPY Pair - Current price: ", currentPrice);
-      Print("TradingSignalEA: JPY Pair - Base: ", baseCurrency, ", Quote: ", quoteCurrency);
-      Print("TradingSignalEA: JPY Pair - Pip value per lot: ", pipValuePerLot);
+   Print("TradingSignalEA: Symbol Info - Tick Value: ", tickValue, ", Tick Size: ", tickSize, ", Point: ", point);
+   
+   if(tickValue > 0 && tickSize > 0) {
+      // Use MT5's built-in tick value for accurate calculation
+      // For JPY pairs: tick value is already in account currency per tick
+      // Convert to pip value: (tick value / tick size) * pip size
+      pipValueInAccountCurrency = (tickValue / tickSize) * pipSize;
+      Print("TradingSignalEA: Using MT5 tick value - Pip value per lot: ", pipValueInAccountCurrency);
    } else {
-      // Standard forex pairs: pip value = contract size * pip size
-      // Example: EURUSD: 100,000 * 0.0001 = 10 USD per pip (if quote is USD)
-      pipValuePerLot = contractSize * pipSize;
-      Print("TradingSignalEA: Standard Pair - Pip value per lot: ", quoteCurrency, " ", pipValuePerLot);
+      // Fallback to manual calculation if tick values not available
+      Print("TradingSignalEA: Tick values not available, using fallback calculation");
+      
+      if(isXAUUSD) {
+         // XAUUSD: 1 lot = 100 oz, 1 pip (0.10) = $10 per lot
+         pipValueInAccountCurrency = 10.0;  // $10 per pip for 1 lot XAUUSD
+         Print("TradingSignalEA: XAUUSD Fallback - Pip value per lot: $", pipValueInAccountCurrency);
+      } else if(isJPY) {
+         // JPY pairs: pip value calculation using current price
+         double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
+         if(currentPrice <= 0) {
+            Print("TradingSignalEA: ERROR - Invalid current price for ", signal.symbol);
+            return 0;
+         }
+         
+         if(baseCurrency != "JPY") {
+            // JPY is quote currency (e.g., USDJPY, EURJPY)
+            // Pip value in base currency = (100,000 * 0.01) / current_price
+            pipValueInAccountCurrency = (100000.0 * pipSize) / currentPrice;
+         } else {
+            // JPY is base currency (e.g., JPYUSD - rare)
+            pipValueInAccountCurrency = 100000.0 * pipSize;
+         }
+         
+         Print("TradingSignalEA: JPY Pair Fallback - Current price: ", currentPrice);
+         Print("TradingSignalEA: JPY Pair Fallback - Base: ", baseCurrency, ", Quote: ", quoteCurrency);
+         Print("TradingSignalEA: JPY Pair Fallback - Pip value per lot: ", pipValueInAccountCurrency);
+      } else {
+         // Standard forex pairs: pip value = contract size * pip size
+         pipValueInAccountCurrency = 100000.0 * pipSize;
+         Print("TradingSignalEA: Standard Pair Fallback - Pip value per lot: ", pipValueInAccountCurrency);
+      }
    }
    
-   if(pipValuePerLot <= 0) {
-      Print("TradingSignalEA: ERROR - Invalid pip value: ", pipValuePerLot);
+   if(pipValueInAccountCurrency <= 0) {
+      Print("TradingSignalEA: ERROR - Invalid pip value: ", pipValueInAccountCurrency);
       return 0;
    }
 
    // Convert pip value to account currency if needed
-   double pipValueInAccountCurrency = pipValuePerLot;
-   
-   // Determine what currency the pip value is currently in
    string pipValueCurrency;
    
    if(isXAUUSD) {
-      // XAUUSD is always quoted in USD
       pipValueCurrency = "USD";
-      Print("TradingSignalEA: XAUUSD - pip value is in USD");
    } else if(isJPY && baseCurrency != "JPY") {
-      // For USDJPY, EURJPY, etc., the pip value is already in the base currency (USD, EUR, etc.)
-      // because the formula (contractSize * pipSize) / currentPrice converts JPY to base currency
       pipValueCurrency = baseCurrency;
-      Print("TradingSignalEA: JPY pair - pip value is in base currency: ", baseCurrency);
-      } else {
-      // For standard pairs, pip value is in the quote currency
+   } else {
       pipValueCurrency = quoteCurrency;
-      Print("TradingSignalEA: Standard pair - pip value is in quote currency: ", quoteCurrency);
    }
    
-   Print("TradingSignalEA: Pip value before conversion: ", pipValuePerLot, " ", pipValueCurrency);
+   Print("TradingSignalEA: Pip value before conversion: ", pipValueInAccountCurrency, " ", pipValueCurrency);
    Print("TradingSignalEA: Account currency: ", accountCurrency);
    
-   // Now convert to account currency if needed
+   // Convert to account currency if needed
    if(accountCurrency != pipValueCurrency) {
-      // Need to convert from pipValueCurrency to account currency
-      string conversionPair1 = pipValueCurrency + accountCurrency;  // e.g., GBPUSD (if GBP->USD)
-      string conversionPair2 = accountCurrency + pipValueCurrency;  // e.g., USDCHF (if CHF->USD)
-      
+      string conversionPair1 = pipValueCurrency + accountCurrency;
+      string conversionPair2 = accountCurrency + pipValueCurrency;
       double conversionRate = 0;
       bool conversionDone = false;
       
       Print("TradingSignalEA: Need to convert ", pipValueCurrency, " to ", accountCurrency);
-      Print("TradingSignalEA: Trying conversion pair: ", conversionPair1);
       
       // Try first format: pipValueCurrency + accountCurrency (e.g., GBPUSD)
-      // In this case, we MULTIPLY (rate shows how many USD per GBP)
       if(SymbolSelect(conversionPair1, true)) {
          conversionRate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
          if(conversionRate > 0) {
-            pipValueInAccountCurrency = pipValuePerLot * conversionRate;
+            pipValueInAccountCurrency = pipValueInAccountCurrency * conversionRate;
             Print("TradingSignalEA: ✓ Found ", conversionPair1, " = ", conversionRate);
-            Print("TradingSignalEA: ✓ Conversion: ", pipValuePerLot, " ", pipValueCurrency, 
-                  " × ", conversionRate, " = ", pipValueInAccountCurrency, " ", accountCurrency);
             conversionDone = true;
          }
       }
       
       // Try second format: accountCurrency + pipValueCurrency (e.g., USDCHF)
-      // In this case, we DIVIDE (rate shows how many CHF per USD, so we need reciprocal)
-      if(!conversionDone) {
-         Print("TradingSignalEA: Trying conversion pair: ", conversionPair2);
-         if(SymbolSelect(conversionPair2, true)) {
-            conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
-            if(conversionRate > 0) {
-               pipValueInAccountCurrency = pipValuePerLot / conversionRate;
-               Print("TradingSignalEA: ✓ Found ", conversionPair2, " = ", conversionRate);
-               Print("TradingSignalEA: ✓ Conversion: ", pipValuePerLot, " ", pipValueCurrency, 
-                     " ÷ ", conversionRate, " = ", pipValueInAccountCurrency, " ", accountCurrency);
-               conversionDone = true;
-            }
+      if(!conversionDone && SymbolSelect(conversionPair2, true)) {
+         conversionRate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
+         if(conversionRate > 0) {
+            pipValueInAccountCurrency = pipValueInAccountCurrency / conversionRate;
+            Print("TradingSignalEA: ✓ Found ", conversionPair2, " = ", conversionRate);
+            conversionDone = true;
          }
       }
       
       if(!conversionDone) {
-         Print("TradingSignalEA: ========================================");
-         Print("TradingSignalEA: ERROR - Cannot find conversion rate!");
-         Print("TradingSignalEA: ----------------------------------------");
-         Print("TradingSignalEA: Need to convert: ", pipValueCurrency, " → ", accountCurrency);
-         Print("TradingSignalEA: Tried: ", conversionPair1, " (not available)");
-         Print("TradingSignalEA: Tried: ", conversionPair2, " (not available)");
-         Print("TradingSignalEA: ----------------------------------------");
-         Print("TradingSignalEA: WARNING: Using 1:1 conversion (INACCURATE!)");
-         Print("TradingSignalEA: This will cause INCORRECT lot size calculation!");
-         Print("TradingSignalEA: Please ensure broker provides these conversion pairs.");
-         Print("TradingSignalEA: ========================================");
+         Print("TradingSignalEA: WARNING: Cannot convert ", pipValueCurrency, " to ", accountCurrency, " - using 1:1");
       }
    } else {
       Print("TradingSignalEA: ✓ No conversion needed - pip value already in ", accountCurrency);
@@ -1204,69 +1294,50 @@ double CalculateLotSize(const TradingSignal& signal) {
    
    Print("TradingSignalEA: Final pip value in ", accountCurrency, ": ", pipValueInAccountCurrency);
 
-   // Get broker costs (commission and spread) if enabled
-   double commissionPerLot = 0;
-   double spreadCostPerLot = 0;
-   double totalCostPerLot = 0;
-   double calculatedLotSize = 0;
+  // Calculate per-lot commission (ONLY commission, not spread - spread is paid on both sides)
+  double commissionPerLotInAccountCcy = 0.0;
+  if(AccountForBrokerCosts) {
+     commissionPerLotInAccountCcy = isXAUUSD ? GoldCommissionPerLot : ForexCommissionPerLot; // round-trip
+
+     // Convert commission to account currency if needed
+     if(accountCurrency != "USD") {
+        string conv1 = "USD" + accountCurrency;
+        string conv2 = accountCurrency + "USD";
+        if(SymbolSelect(conv1, true)) {
+           double rate = SymbolInfoDouble(conv1, SYMBOL_BID);
+           if(rate > 0) commissionPerLotInAccountCcy *= rate;
+        } else if(SymbolSelect(conv2, true)) {
+           double rate = SymbolInfoDouble(conv2, SYMBOL_BID);
+           if(rate > 0) commissionPerLotInAccountCcy /= rate;
+        }
+     }
+  }
+
+  double perLotRiskValue = stopDistancePips * pipValueInAccountCurrency;
+  
+  // CORRECTED: Only include commission in denominator (spread applies to both win/loss)
+  // This ensures net profit/loss at TP/SL matches the target risk amount
+  double perLotCommission = AccountForBrokerCosts ? commissionPerLotInAccountCcy : 0.0;
+
+  // Calculate lot size: Risk = (StopPips × PipValue + Commission) × Lot
+  // Lot = Risk / (StopPips × PipValue + Commission)
+  double denominator = perLotRiskValue + perLotCommission;
+  double calculatedLotSize = (denominator > 0.0) ? (targetRiskAmount / denominator) : 0.0;
    
-   if(AccountForBrokerCosts && !AdjustTargetForCosts) {
-      // METHOD 1: Reduce lot size to account for broker costs
-      long spreadPointsLong = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
-      double spreadPoints = (double)spreadPointsLong;
-      double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
-      
-      // Use configured commission rates
-      if(isXAUUSD) {
-         commissionPerLot = GoldCommissionPerLot;
-      } else {
-         commissionPerLot = ForexCommissionPerLot;
-      }
-      
-      // Convert commission to account currency if needed
-      if(accountCurrency != "USD") {
-         // Commission is typically in USD, need to convert
-         string conversionPair1 = "USD" + accountCurrency;
-         string conversionPair2 = accountCurrency + "USD";
-         
-         if(SymbolSelect(conversionPair1, true)) {
-            double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
-            if(rate > 0) commissionPerLot *= rate;
-         } else if(SymbolSelect(conversionPair2, true)) {
-            double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
-            if(rate > 0) commissionPerLot /= rate;
-         }
-      }
-      
-      // Total cost per lot = spread cost + commission
-      spreadCostPerLot = spreadInPips * pipValueInAccountCurrency;
-      totalCostPerLot = spreadCostPerLot + commissionPerLot;
-      
-      Print("TradingSignalEA: Spread: ", spreadPoints, " points (", spreadInPips, " pips)");
-      Print("TradingSignalEA: Spread Cost per Lot: ", accountCurrency, " ", spreadCostPerLot);
-      Print("TradingSignalEA: Commission per Lot: ", accountCurrency, " ", commissionPerLot);
-      Print("TradingSignalEA: Total Broker Cost per Lot: ", accountCurrency, " ", totalCostPerLot);
-      
-      // Adjusted formula: Account for costs in lot size calculation
-      // Total Risk = (Stop Distance * Pip Value * Lot Size) + (Broker Costs * Lot Size)
-      // Lot Size = Total Risk / (Stop Distance * Pip Value + Broker Costs)
-      double effectiveRiskPerLot = (stopDistancePips * pipValueInAccountCurrency) + totalCostPerLot;
-      calculatedLotSize = targetRiskAmount / effectiveRiskPerLot;
-      
-      Print("TradingSignalEA: Stop Risk per Lot: ", accountCurrency, " ", stopDistancePips * pipValueInAccountCurrency);
-      Print("TradingSignalEA: Effective Risk per Lot (with costs): ", accountCurrency, " ", effectiveRiskPerLot);
-      Print("TradingSignalEA: Calculated Lot Size (METHOD 1 - reduced lot): ", calculatedLotSize);
-   } else {
-      // METHOD 2: Calculate lot size WITHOUT reducing for costs (costs will be compensated by adjusting TP)
-      // OR if broker cost accounting is disabled entirely
-      calculatedLotSize = targetRiskAmount / (stopDistancePips * pipValueInAccountCurrency);
-      
-      if(AdjustTargetForCosts) {
-         Print("TradingSignalEA: Calculated Lot Size (METHOD 2 - will adjust TP target): ", calculatedLotSize);
-      } else {
-         Print("TradingSignalEA: Calculated Lot Size (NO cost adjustment): ", calculatedLotSize);
-      }
-   }
+   Print("TradingSignalEA: ========================================");
+   Print("TradingSignalEA: LOT SIZE CALCULATION BREAKDOWN");
+   Print("TradingSignalEA: ----------------------------------------");
+   Print("TradingSignalEA: Target Risk Amount: ", accountCurrency, " ", targetRiskAmount);
+   Print("TradingSignalEA: Stop Distance: ", stopDistancePips, " pips");
+   Print("TradingSignalEA: Pip Value per Lot: ", accountCurrency, " ", pipValueInAccountCurrency);
+  Print("TradingSignalEA: Risk per Lot (pips×pipValue): ", accountCurrency, " ", perLotRiskValue);
+  if(AccountForBrokerCosts) {
+     Print("TradingSignalEA: Commission per Lot: ", accountCurrency, " ", perLotCommission);
+     Print("TradingSignalEA: Denominator (risk + commission): ", accountCurrency, " ", denominator);
+  }
+   Print("TradingSignalEA: Calculated Lot Size (before constraints): ", calculatedLotSize);
+   Print("TradingSignalEA: Formula: ", targetRiskAmount, " ÷ (", stopDistancePips, " × ", pipValueInAccountCurrency, ") = ", calculatedLotSize);
+   Print("TradingSignalEA: ========================================");
 
    // Apply broker constraints
    double minLot = SymbolInfoDouble(signal.symbol, SYMBOL_VOLUME_MIN);
@@ -1290,85 +1361,125 @@ double CalculateLotSize(const TradingSignal& signal) {
       finalLotSize = maxLot;
    }
 
-   // Calculate broker costs for the final lot size
-   if(AccountForBrokerCosts || AdjustTargetForCosts) {
-      // Get spread and commission
-      long spreadPointsLong = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
-      double spreadPoints = (double)spreadPointsLong;
-      double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
-      
-      // Use configured commission rates
-      if(isXAUUSD) {
-         commissionPerLot = GoldCommissionPerLot;
-      } else {
-         commissionPerLot = ForexCommissionPerLot;
-      }
-      
-      // Convert commission to account currency if needed
-      if(accountCurrency != "USD") {
-         string conversionPair1 = "USD" + accountCurrency;
-         string conversionPair2 = accountCurrency + "USD";
-         
-         if(SymbolSelect(conversionPair1, true)) {
-            double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
-            if(rate > 0) commissionPerLot *= rate;
-         } else if(SymbolSelect(conversionPair2, true)) {
-            double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
-            if(rate > 0) commissionPerLot /= rate;
-         }
-      }
-      
-      spreadCostPerLot = spreadInPips * pipValueInAccountCurrency;
-      totalCostPerLot = spreadCostPerLot + commissionPerLot;
-   }
-   
-   // Calculate actual risk with final lot size (including broker costs if enabled)
-   double stopRiskAmount = finalLotSize * stopDistancePips * pipValueInAccountCurrency;
-   double brokerCostsAmount = 0;
-   double actualRiskAmount = stopRiskAmount;
-   
-   if(AccountForBrokerCosts || AdjustTargetForCosts) {
-      brokerCostsAmount = finalLotSize * totalCostPerLot;
-      actualRiskAmount = stopRiskAmount + brokerCostsAmount;
-   }
-   
+   // Calculate actual risk with final lot size
+   double actualRiskAmount = finalLotSize * stopDistancePips * pipValueInAccountCurrency;
    double riskDeviation = ((actualRiskAmount - targetRiskAmount) / targetRiskAmount) * 100.0;
    
    Print("TradingSignalEA: ========================================");
    Print("TradingSignalEA: FINAL RISK SUMMARY");
    Print("TradingSignalEA: ----------------------------------------");
    Print("TradingSignalEA: Final Lot Size: ", finalLotSize);
-   Print("TradingSignalEA: Stop Loss Risk: ", accountCurrency, " ", stopRiskAmount);
-   if(AccountForBrokerCosts || AdjustTargetForCosts) {
-      Print("TradingSignalEA: Broker Costs (", finalLotSize, " lots): ", accountCurrency, " ", brokerCostsAmount);
-   }
-   Print("TradingSignalEA: Total Actual Risk: ", accountCurrency, " ", actualRiskAmount);
+   Print("TradingSignalEA: Stop Distance: ", stopDistancePips, " pips");
+   Print("TradingSignalEA: Pip Value: ", accountCurrency, " ", pipValueInAccountCurrency);
+   Print("TradingSignalEA: Actual Risk: ", accountCurrency, " ", actualRiskAmount);
    Print("TradingSignalEA: Target Risk: ", accountCurrency, " ", targetRiskAmount);
    Print("TradingSignalEA: Risk Deviation: ", riskDeviation, "%");
    Print("TradingSignalEA: ========================================");
    
-   // Warn if risk deviation is significant (only if we're NOT adjusting target to compensate)
-   if(!AdjustTargetForCosts && MathAbs(riskDeviation) > 15.0) {
+   // Warn if risk deviation is significant
+   if(MathAbs(riskDeviation) > 15.0) {
       Print("TradingSignalEA: WARNING - Risk deviation exceeds 15% (", riskDeviation, "%)");
       Print("TradingSignalEA: This may be due to broker lot size constraints");
-   }
-   
-   // Reject trade if risk is more than 50% higher than target (safety check)
-   // Exception: if we're adjusting target, we'll compensate for this
-   if(!AdjustTargetForCosts && actualRiskAmount > targetRiskAmount * 1.5) {
-      Print("TradingSignalEA: ERROR - Actual risk (", actualRiskAmount, ") exceeds target by >50%. Trade rejected for safety.");
-      return 0;
    }
    
    return finalLotSize;
 }
 
 //+------------------------------------------------------------------+
-//| Calculate adjusted target price to compensate for broker costs   |
+//| Calculate 1:1 R:R adjusted target based on actual execution price |
+//| Uses actual execution price to ensure accurate TP/SL ratio        |
 //+------------------------------------------------------------------+
-double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
+double CalculateOneToOneTarget(const TradingSignal& signal, double actualEntryPrice) {
+   if(!ForceOneToOneRR) {
+      // Even if not forcing 1:1, calculate based on actual entry for accuracy
+      double pipSize = 0;
+      bool isXAUUSD = (signal.symbol == "XAUUSD" || signal.symbol == "XAGUSD");
+      bool isJPY = (StringFind(signal.symbol, "JPY") >= 0);
+      if(isXAUUSD) pipSize = 0.10;
+      else if(isJPY) pipSize = 0.01;
+      else pipSize = 0.0001;
+      
+      // Calculate stop distance from actual entry
+      double stopDistancePips = 0;
+      if(signal.action == ORDER_TYPE_BUY) {
+         stopDistancePips = (actualEntryPrice - signal.stop) / pipSize;
+      } else {
+         stopDistancePips = (signal.stop - actualEntryPrice) / pipSize;
+      }
+      
+      // Calculate target distance to match stop distance
+      double targetDistancePips = stopDistancePips;
+      if(signal.action == ORDER_TYPE_BUY) {
+         return actualEntryPrice + (targetDistancePips * pipSize);
+      } else {
+         return actualEntryPrice - (targetDistancePips * pipSize);
+      }
+   }
+   
+   // Calculate stop distance in pips
+   double stopDistancePips = 0;
+   double pipSize = 0;
+   
+   // Identify symbol type
+   bool isXAUUSD = (signal.symbol == "XAUUSD" || signal.symbol == "XAGUSD");
+   bool isJPY = (StringFind(signal.symbol, "JPY") >= 0);
+   
+   // Define pip size based on symbol type
+   if(isXAUUSD) {
+      pipSize = 0.10;  // For Gold
+   } else if(isJPY) {
+      pipSize = 0.01;  // For JPY pairs
+   } else {
+      pipSize = 0.0001;  // For standard pairs
+   }
+   
+   // Calculate stop distance using ACTUAL execution price (not signal entry)
+   double stopDistanceFromActual = 0;
+   if(signal.action == ORDER_TYPE_BUY) {
+      stopDistanceFromActual = actualEntryPrice - signal.stop;
+   } else {
+      stopDistanceFromActual = signal.stop - actualEntryPrice;
+   }
+   
+   stopDistancePips = stopDistanceFromActual / pipSize;
+   
+   // Calculate target distance to match stop distance (1:1 R:R)
+   double targetDistancePips = stopDistancePips;
+   
+   // Calculate adjusted target price based on ACTUAL entry
+   double adjustedTarget = 0;
+   if(signal.action == ORDER_TYPE_BUY) {
+      // For BUY: target is above actual entry
+      adjustedTarget = actualEntryPrice + (targetDistancePips * pipSize);
+   } else {
+      // For SELL: target is below actual entry
+      adjustedTarget = actualEntryPrice - (targetDistancePips * pipSize);
+   }
+   
+   Print("TradingSignalEA: ========================================");
+   Print("TradingSignalEA: 1:1 R:R TARGET ADJUSTMENT");
+   Print("TradingSignalEA: ----------------------------------------");
+   Print("TradingSignalEA: Signal Entry: ", signal.entry);
+   Print("TradingSignalEA: Actual Entry: ", actualEntryPrice);
+   Print("TradingSignalEA: Stop Loss: ", signal.stop);
+   Print("TradingSignalEA: Stop Distance: ", stopDistancePips, " pips");
+   Print("TradingSignalEA: Target Distance: ", targetDistancePips, " pips");
+   Print("TradingSignalEA: Adjusted Target: ", adjustedTarget);
+   Print("TradingSignalEA: ========================================");
+   
+   return adjustedTarget;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate adjusted target price to compensate for broker costs   |
+//| CORRECTED VERSION - Ensure TP slightly larger than SL for net 1:1 |
+//+------------------------------------------------------------------+
+double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize, double actualEntryPrice) {
+   // First, ensure 1:1 R:R if enabled (using actual entry price)
+   double baseTarget = CalculateOneToOneTarget(signal, actualEntryPrice);
+   
    if(!AdjustTargetForCosts || !AccountForBrokerCosts) {
-      return signal.target;  // No adjustment needed
+      return baseTarget;  // Return 1:1 R:R target without cost adjustment
    }
    
    string accountCurrency = AccountInfoString(ACCOUNT_CURRENCY);
@@ -1387,29 +1498,50 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
       pipSize = 0.0001;  // For standard pairs
    }
    
-   // Calculate pip value per lot
-   double pipValuePerLot = 0;
-   double contractSize = 100000.0;
-   string baseCurrency = StringSubstr(signal.symbol, 0, 3);
-   string quoteCurrency = StringSubstr(signal.symbol, 3, 3);
+   // Calculate stop distance using ACTUAL execution price (not signal entry)
+   double stopDistanceFromActual = 0;
+   if(signal.action == ORDER_TYPE_BUY) {
+      stopDistanceFromActual = actualEntryPrice - signal.stop;
+   } else {
+      stopDistanceFromActual = signal.stop - actualEntryPrice;
+   }
+   double stopDistancePips = stopDistanceFromActual / pipSize;
    
-   if(isXAUUSD) {
-      pipValuePerLot = 10.0;  // $10 per pip for XAUUSD
-   } else if(isJPY) {
-      double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
-      if(currentPrice > 0) {
-         // For JPY pairs where JPY is quote (USDJPY, EURJPY), pip value is in base currency
-         pipValuePerLot = (contractSize * pipSize) / currentPrice;
-      }
+   // Calculate pip value per lot in account currency using MT5's built-in functions
+   double pipValueInAccountCurrency = 0;
+   double tickValue = SymbolInfoDouble(signal.symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(signal.symbol, SYMBOL_TRADE_TICK_SIZE);
+   
+   if(tickValue > 0 && tickSize > 0) {
+      // Use MT5's built-in tick value for accurate calculation
+      pipValueInAccountCurrency = (tickValue / tickSize) * pipSize;
+      Print("TradingSignalEA: Target Adjustment - Using MT5 tick value: ", pipValueInAccountCurrency);
+   } else {
+      // Fallback to manual calculation
+      string baseCurrency = StringSubstr(signal.symbol, 0, 3);
+      string quoteCurrency = StringSubstr(signal.symbol, 3, 3);
+      
+      if(isXAUUSD) {
+         pipValueInAccountCurrency = 10.0;  // $10 per pip for XAUUSD
+      } else if(isJPY) {
+         double currentPrice = SymbolInfoDouble(signal.symbol, SYMBOL_BID);
+         if(currentPrice > 0) {
+            if(baseCurrency != "JPY") {
+               pipValueInAccountCurrency = (100000.0 * pipSize) / currentPrice;
+            } else {
+               pipValueInAccountCurrency = 100000.0 * pipSize;
+            }
+         }
       } else {
-      pipValuePerLot = contractSize * pipSize;
+         pipValueInAccountCurrency = 100000.0 * pipSize;
+      }
+      Print("TradingSignalEA: Target Adjustment - Using fallback calculation: ", pipValueInAccountCurrency);
    }
    
-   // Convert pip value to account currency if needed
-   double pipValueInAccountCurrency = pipValuePerLot;
-   
-   // Determine what currency the pip value is currently in
+   // Convert to account currency if needed
    string pipValueCurrency;
+   string baseCurrency = StringSubstr(signal.symbol, 0, 3);
+   string quoteCurrency = StringSubstr(signal.symbol, 3, 3);
    
    if(isXAUUSD) {
       pipValueCurrency = "USD";
@@ -1419,33 +1551,25 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
       pipValueCurrency = quoteCurrency;
    }
    
-   // Now convert to account currency if needed
    if(accountCurrency != pipValueCurrency) {
       string conversionPair1 = pipValueCurrency + accountCurrency;
       string conversionPair2 = accountCurrency + pipValueCurrency;
       bool conversionDone = false;
       
-      // Try first format (multiply)
       if(SymbolSelect(conversionPair1, true)) {
          double rate = SymbolInfoDouble(conversionPair1, SYMBOL_BID);
          if(rate > 0) {
-            pipValueInAccountCurrency = pipValuePerLot * rate;
+            pipValueInAccountCurrency = pipValueInAccountCurrency * rate;
             conversionDone = true;
          }
       }
       
-      // Try second format (divide)
       if(!conversionDone && SymbolSelect(conversionPair2, true)) {
          double rate = SymbolInfoDouble(conversionPair2, SYMBOL_BID);
          if(rate > 0) {
-            pipValueInAccountCurrency = pipValuePerLot / rate;
+            pipValueInAccountCurrency = pipValueInAccountCurrency / rate;
             conversionDone = true;
          }
-      }
-      
-      if(!conversionDone) {
-         Print("TradingSignalEA: WARNING - CalculateAdjustedTarget: Cannot convert ", 
-               pipValueCurrency, " to ", accountCurrency, " - using 1:1");
       }
    }
    
@@ -1476,27 +1600,54 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize) {
    // Calculate total broker costs for the position
    double totalBrokerCosts = lotSize * totalCostPerLot;
    
-   // Convert broker costs to pips that need to be added to the target
-   double additionalPipsNeeded = totalBrokerCosts / (lotSize * pipValueInAccountCurrency);
+   // Calculate how many pips to add to target to compensate for broker costs
+   // This ensures net profit at TP equals the risk amount at SL (after costs)
+   double costPipsToAdd = totalBrokerCosts / (lotSize * pipValueInAccountCurrency);
    
-   // Adjust target price to compensate for broker costs
+   // Limit adjustment to reasonable range (5-15% of stop distance, max 10 pips)
+   double maxAdjustmentPercent = 0.15;  // Max 15% of stop distance
+   double maxAdjustmentPips = MathMax(stopDistancePips * maxAdjustmentPercent, MathMin(10.0, stopDistancePips * 0.10));
+   
+   if(costPipsToAdd > maxAdjustmentPips) {
+      Print("TradingSignalEA: WARNING - Cost adjustment (", costPipsToAdd, " pips) exceeds max (", maxAdjustmentPips, " pips), limiting");
+      costPipsToAdd = maxAdjustmentPips;
+   }
+   
+   // Ensure TP is at least slightly larger than SL (minimum 2% more to cover costs)
+   double minTPPips = stopDistancePips * 1.02;  // At least 2% more
+   double targetPipsWithCost = stopDistancePips + costPipsToAdd;
+   double finalTargetPips = MathMax(minTPPips, targetPipsWithCost);
+   
+   // Calculate final target price based on actual entry
    double adjustedTarget = 0;
    if(signal.action == ORDER_TYPE_BUY) {
-      // For BUY: target is above entry, add more pips
-      adjustedTarget = signal.target + (additionalPipsNeeded * pipSize);
+      // For BUY: target is above actual entry
+      adjustedTarget = actualEntryPrice + (finalTargetPips * pipSize);
    } else {
-      // For SELL: target is below entry, subtract more pips (move target further down)
-      adjustedTarget = signal.target - (additionalPipsNeeded * pipSize);
+      // For SELL: target is below actual entry
+      adjustedTarget = actualEntryPrice - (finalTargetPips * pipSize);
    }
+   
+   // Calculate actual TP/SL ratio
+   double actualTPPips = finalTargetPips;
+   double actualSLPips = stopDistancePips;
+   double tpSlRatio = actualTPPips / actualSLPips;
    
    Print("TradingSignalEA: ========================================");
    Print("TradingSignalEA: TARGET ADJUSTMENT FOR BROKER COSTS");
    Print("TradingSignalEA: ----------------------------------------");
-   Print("TradingSignalEA: Original Target: ", signal.target);
+   Print("TradingSignalEA: Actual Entry Price: ", actualEntryPrice);
+   Print("TradingSignalEA: Stop Loss: ", signal.stop);
+   Print("TradingSignalEA: Stop Distance: ", actualSLPips, " pips");
    Print("TradingSignalEA: Total Broker Costs: ", accountCurrency, " ", totalBrokerCosts);
-   Print("TradingSignalEA: Additional Pips Needed: ", additionalPipsNeeded);
-   Print("TradingSignalEA: Adjusted Target: ", adjustedTarget);
-   Print("TradingSignalEA: Target Adjustment: ", (adjustedTarget - signal.target), " (", additionalPipsNeeded, " pips)");
+   Print("TradingSignalEA: Cost Pips to Add: ", costPipsToAdd);
+   Print("TradingSignalEA: Final Target Pips: ", actualTPPips, " pips");
+   Print("TradingSignalEA: TP/SL Ratio: ", DoubleToString(tpSlRatio, 3));
+   Print("TradingSignalEA: Final Adjusted Target: ", adjustedTarget);
+   Print("TradingSignalEA: Expected Net Profit (at TP): ", accountCurrency, " ", 
+         (lotSize * actualTPPips * pipValueInAccountCurrency) - totalBrokerCosts);
+   Print("TradingSignalEA: Expected Net Loss (at SL): ", accountCurrency, " ", 
+         (lotSize * actualSLPips * pipValueInAccountCurrency) + totalBrokerCosts);
    Print("TradingSignalEA: ========================================");
    
    return adjustedTarget;
@@ -1564,35 +1715,50 @@ bool ExecuteTrade(const TradingSignal& signal) {
    request.magic = MagicNumber;
    request.comment = "Signal: " + signal.id + " | Risk: " + DoubleToString(signal.risk_percent, 2) + "%";
    
-   if(UseStopLoss && signal.stop > 0) {
+  if(UseStopLoss && signal.stop > 0) {
       // Use EXACT stop loss from signal - NO BUFFER
       request.sl = signal.stop;
    }
-   if(UseTakeProfit && signal.target > 0) {
-      // Calculate adjusted target if enabled (to compensate for broker costs)
-      // This extends TP to maintain 1:1 R:R after commission/spread
-      double finalTarget = CalculateAdjustedTarget(signal, lotSize);
-      // Use EXACT target - NO BUFFER (target is already adjusted for costs if enabled)
-      request.tp = finalTarget;
-   }
+  if(UseTakeProfit && signal.stop > 0) {
+     // Calculate target based on ACTUAL execution price (not signal entry)
+     // This ensures TP/SL ratio is accurate regardless of slippage
+     double finalTarget = CalculateAdjustedTarget(signal, lotSize, currentPrice);
+     request.tp = finalTarget;
+  }
    
    MqlTradeResult result = {};
-   if(!OrderSend(request, result)) {
+  if(!OrderSend(request, result)) {
       int errorCode = GetLastError();
       Print("TradingSignalEA: Order failed - Error Code: ", errorCode, 
             " | Symbol: ", signal.symbol, " | Price: ", currentPrice);
+    // Email on execution failure
+    SendTradeExecutionEmail(signal, result, false);
+    SendErrorEmail("Trade Execution Failed", 
+                   StringFormat("LastError: %d\nSymbol: %s\nPrice: %.5f", errorCode, signal.symbol, currentPrice));
       return false;
    }
    
    if(result.retcode != TRADE_RETCODE_DONE) {
       Print("TradingSignalEA: Execution failed - Code: ", result.retcode, 
             " | Expected Price: ", currentPrice, " | Actual Price: ", result.price);
+    // Email on execution failure
+    SendTradeExecutionEmail(signal, result, false);
+    SendErrorEmail("Trade Execution Failed", 
+                   StringFormat("Execution Code: %d\nExpected: %.5f\nActual: %.5f", result.retcode, currentPrice, result.price));
       return false;
    }
    
+  // Email on execution success
+  SendTradeExecutionEmail(signal, result, true);
+
    Print("TradingSignalEA: Trade executed - Ticket: ", result.order,
          " | Symbol: ", signal.symbol, " | Price: ", result.price, " | Lot: ", lotSize,
          " | Risk: ", signal.risk_percent, "%");
+   
+   // Release global signal lock after successful execution
+   globalSignalLock = "";
+   globalSignalLockTime = 0;
+   
    return true;
 }
 
@@ -1890,7 +2056,17 @@ bool UpdateTradeOutcome(ulong ticket, string outcome) {
 
    if(result == 200) {
       Print("TradingSignalEA: Trade outcome updated successfully - Ticket: ", ticket, ", Outcome: ", outcome);
-      return true;
+    // Send trade close email
+    double profit = 0.0;
+    for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket > 0 && HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID) == ticket) {
+        profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+        break;
+      }
+    }
+    SendTradeCloseEmail(ticket, Symbol(), profit, outcome);
+    return true;
    } else {
       Print("TradingSignalEA: Failed to update trade outcome - Ticket: ", ticket, ", Error: ", result);
       return false;
@@ -2033,12 +2209,17 @@ void RemoveSignalFromRetryList(const string& signalId) {
 //| Check if position already exists for this symbol                 |
 //+------------------------------------------------------------------+
 bool HasOpenPosition(const string& symbol) {
-   for(int i = 0; i < PositionsTotal(); i++) {
-      if(PositionGetSymbol(i) == symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
-         return true;
-      }
-   }
-   return false;
+  for(int i = 0; i < PositionsTotal(); i++) {
+     ulong ticket = PositionGetTicket(i);
+     if(ticket > 0 && PositionSelectByTicket(ticket)) {
+        string posSymbol = PositionGetString(POSITION_SYMBOL);
+        long posMagic = PositionGetInteger(POSITION_MAGIC);
+        if(posSymbol == symbol && posMagic == MagicNumber) {
+           return true;
+        }
+     }
+  }
+  return false;
 }
 
 //+------------------------------------------------------------------+
@@ -2093,12 +2274,15 @@ void UpdateActiveSymbols() {
    activeSymbolsCount = 0;
    ArrayResize(activeSymbols, 0);
    
-   for(int i = 0; i < PositionsTotal(); i++) {
-      if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
-         string symbol = PositionGetSymbol(i);
-         AddActiveSymbol(symbol);
-      }
-   }
+  for(int i = 0; i < PositionsTotal(); i++) {
+     ulong ticket = PositionGetTicket(i);
+     if(ticket > 0 && PositionSelectByTicket(ticket)) {
+        if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+           string symbol = PositionGetString(POSITION_SYMBOL);
+           AddActiveSymbol(symbol);
+        }
+     }
+  }
 }
 
 //+------------------------------------------------------------------+
@@ -2122,3 +2306,142 @@ void MarkTradeOutcomeProcessed(ulong ticket) {
    processedTickets[size] = ticket;
 }
 //+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Email notification functions                                     |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Send email notification with error handling                      |
+//+------------------------------------------------------------------+
+void SendTradeEmail(string subject, string body) {
+  if(!SendEmailNotifications || EmailAddress == "") return;
+  if(!SendMail(subject, body)) {
+    Print("TradingSignalEA: Failed to send email notification");
+  } else {
+    Print("TradingSignalEA: Email notification sent to ", EmailAddress);
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Format and send trade execution email                            |
+//+------------------------------------------------------------------+
+void SendTradeExecutionEmail(const TradingSignal& signal, const MqlTradeResult& result, bool success) {
+  if(!SendOnTradeOpen) return;
+  string actionStr = (signal.action == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+  string statusStr = success ? "EXECUTED" : "FAILED";
+  string subject = StringFormat("MT5 Trade %s - %s %s (ID: %s)", statusStr, actionStr, signal.symbol, signal.id);
+
+  double stopPips = 0.0;
+  double pipSizeLocal = 0.0;
+  bool isXAUUSDLocal = (signal.symbol == "XAUUSD" || signal.symbol == "XAGUSD");
+  bool isJPYLocal = (StringFind(signal.symbol, "JPY") >= 0);
+  if(isXAUUSDLocal) pipSizeLocal = 0.10; else if(isJPYLocal) pipSizeLocal = 0.01; else pipSizeLocal = 0.0001;
+  double priceDiffLocal = (signal.action == ORDER_TYPE_BUY) ? (signal.entry - signal.stop) : (signal.stop - signal.entry);
+  if(pipSizeLocal > 0) stopPips = priceDiffLocal / pipSizeLocal;
+
+  string body = StringFormat(
+    "Signal ID: %s\n"
+    "Symbol: %s\n"
+    "Action: %s\n"
+    "Entry: %.5f\n"
+    "Stop: %.5f\n"
+    "Target: %.5f\n"
+    "Lot: %.2f\n"
+    "Risk: %.2f%%\n"
+    "Stop Distance: %.1f pips\n"
+    "Status: %s\n"
+    "Ticket: %d\n"
+    "Exec Price: %.5f\n"
+    "Time: %s\n"
+    "Comment: %s\n"
+    "Account: %d",
+    signal.id,
+    signal.symbol,
+    actionStr,
+    signal.entry,
+    signal.stop,
+    signal.target,
+    result.volume,
+    signal.risk_percent,
+    stopPips,
+    statusStr,
+    result.order,
+    result.price,
+    TimeToString(TimeGMT()),
+    result.comment,
+    AccountInfoInteger(ACCOUNT_LOGIN)
+  );
+
+  SendTradeEmail(subject, body);
+}
+
+//+------------------------------------------------------------------+
+//| Format and send trade close email                                |
+//+------------------------------------------------------------------+
+void SendTradeCloseEmail(ulong ticket, string symbol, double profit, string outcome) {
+  if(!SendOnTradeClose) return;
+  string outcomeTag = (outcome == "win") ? "WIN" : "LOSS";
+  string subject = StringFormat("MT5 Trade CLOSED - %s %s (Ticket: %d)", outcomeTag, symbol, ticket);
+  string body = StringFormat(
+    "Ticket: %d\n"
+    "Symbol: %s\n"
+    "Outcome: %s\n"
+    "Profit: $%.2f\n"
+    "Close Time: %s\n"
+    "Balance: $%.2f\n"
+    "Equity: $%.2f\n"
+    "Account: %d",
+    ticket,
+    symbol,
+    outcomeTag,
+    profit,
+    TimeToString(TimeGMT()),
+    AccountInfoDouble(ACCOUNT_BALANCE),
+    AccountInfoDouble(ACCOUNT_EQUITY),
+    AccountInfoInteger(ACCOUNT_LOGIN)
+  );
+  SendTradeEmail(subject, body);
+}
+
+//+------------------------------------------------------------------+
+//| Send connection status email                                     |
+//+------------------------------------------------------------------+
+void SendConnectionStatusEmail(string status, string details = "") {
+  if(!SendOnConnectionStatus) return;
+  string subject = StringFormat("MT5 Connection %s - Account %d", status, AccountInfoInteger(ACCOUNT_LOGIN));
+  string body = StringFormat(
+    "Status: %s\n"
+    "Time: %s\n"
+    "Account: %d\n"
+    "Terminal: %s\n"
+    "Server: %s\n\n"
+    "%s",
+    status,
+    TimeToString(TimeGMT()),
+    AccountInfoInteger(ACCOUNT_LOGIN),
+    TerminalInfoString(TERMINAL_NAME),
+    AccountInfoString(ACCOUNT_SERVER),
+    details
+  );
+  SendTradeEmail(subject, body);
+}
+
+//+------------------------------------------------------------------+
+//| Send error notification email                                    |
+//+------------------------------------------------------------------+
+void SendErrorEmail(string errorType, string errorDetails) {
+  if(!SendOnErrors) return;
+  string subject = StringFormat("MT5 ERROR - %s (Account: %d)", errorType, AccountInfoInteger(ACCOUNT_LOGIN));
+  string body = StringFormat(
+    "Error: %s\n"
+    "Time: %s\n"
+    "Account: %d\n\n"
+    "%s",
+    errorType,
+    TimeToString(TimeGMT()),
+    AccountInfoInteger(ACCOUNT_LOGIN),
+    errorDetails
+  );
+  SendTradeEmail(subject, body);
+}

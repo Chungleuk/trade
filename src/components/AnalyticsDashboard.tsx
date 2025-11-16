@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { TradingAnalytics, AnalyticsFilters } from '../types/analytics';
 import { AnalyticsService } from '../services/analyticsService';
-import { fixAllInvalidNodes } from '../services/positionSizingService';
+import { fixAllInvalidNodes, cleanupOrphanedNodes } from '../services/positionSizingService';
 
 // Register Chart.js components
 ChartJS.register(
@@ -53,18 +53,19 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
     fetchAnalytics();
   }, [filters, refreshTrigger]); // Add refreshTrigger to dependencies
 
-  // Auto-fix invalid nodes on dashboard load
+  // Auto-fix invalid nodes and cleanup orphaned entries on dashboard load
   useEffect(() => {
-    const fixInvalidNodes = async () => {
+    const fixAndCleanup = async () => {
       try {
         await fixAllInvalidNodes();
+        await cleanupOrphanedNodes();
         // Refresh analytics after fixing
         fetchAnalytics();
       } catch (err) {
         console.error('Error fixing invalid nodes:', err);
       }
     };
-    fixInvalidNodes();
+    fixAndCleanup();
   }, []); // Run once on mount
 
   const fetchAnalytics = async () => {
@@ -314,6 +315,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
               onClick={async () => {
                 try {
                   await fixAllInvalidNodes();
+                  await cleanupOrphanedNodes();
                   await fetchAnalytics();
                 } catch (err) {
                   console.error('Error fixing invalid nodes:', err);
@@ -322,7 +324,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
               className="px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100 transition-colors flex items-center"
             >
               <RefreshCw className="w-4 h-4 mr-2" />
-              Fix Invalid Nodes
+              Fix & Cleanup
             </button>
           </div>
           <div className="overflow-x-auto">

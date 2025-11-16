@@ -134,6 +134,69 @@ export async function fixAllInvalidNodes(): Promise<void> {
   }
 }
 
+// Clean up orphaned position sizing states (pairs with no trades)
+export async function cleanupOrphanedNodes(): Promise<void> {
+  try {
+    // Get all position sizing states
+    const { data: allStates, error: statesError } = await supabase
+      .from('position_sizing_state')
+      .select('*');
+    
+    if (statesError) {
+      console.error('[Position Sizing] Error fetching states for cleanup:', statesError);
+      return;
+    }
+    
+    if (!allStates || allStates.length === 0) return;
+    
+    // Get all completed trades grouped by symbol
+    const { data: allAlerts, error: alertsError } = await supabase
+      .from('trading_alerts')
+      .select('symbol, status, outcome')
+      .eq('status', 'completed')
+      .not('outcome', 'is', null);
+    
+    if (alertsError) {
+      console.error('[Position Sizing] Error fetching alerts for cleanup:', alertsError);
+      return;
+    }
+    
+    // Create a set of symbols that have completed trades
+    const symbolsWithTrades = new Set<string>();
+    (allAlerts || []).forEach(alert => {
+      if (alert.symbol) {
+        symbolsWithTrades.add(alert.symbol.toUpperCase());
+      }
+    });
+    
+    // Find orphaned states (no completed trades for this symbol)
+    let deletedCount = 0;
+    for (const state of allStates) {
+      if (!symbolsWithTrades.has(state.group_key)) {
+        console.log(`[Position Sizing] Removing orphaned state for ${state.group_key} (no completed trades)`);
+        const { error: deleteError } = await supabase
+          .from('position_sizing_state')
+          .delete()
+          .eq('group_key', state.group_key);
+        
+        if (deleteError) {
+          console.error(`[Position Sizing] Error deleting orphaned state for ${state.group_key}:`, deleteError);
+        } else {
+          deletedCount++;
+        }
+      }
+    }
+    
+    if (deletedCount > 0) {
+      console.log(`[Position Sizing] Cleaned up ${deletedCount} orphaned node(s) from database`);
+    } else {
+      console.log('[Position Sizing] No orphaned nodes found');
+    }
+  } catch (error) {
+    console.error('[Position Sizing] Error cleaning up orphaned nodes:', error);
+  }
+}
+
 // Advance node according to outcome: increment wins or losses in the node key "W-L"
 export function advanceNode(currentNode: string, outcome: Outcome): string {
   if (currentNode === 'Start') {

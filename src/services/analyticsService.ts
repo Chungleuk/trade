@@ -189,24 +189,26 @@ export class AnalyticsService {
         return [];
       }
 
-      return (positionStates || []).map(state => {
-        // Validate and normalize node (fixes invalid nodes like "8-13")
-        const validatedNode = validateAndNormalizeNode(state.current_node);
-        
-        // Count completed trades for this symbol group
-        const symbolTrades = alerts.filter(a => a.symbol.toUpperCase() === state.group_key);
-        const tradesAtNode = symbolTrades.filter(t => 
-          t.status === 'completed' && t.outcome
-        ).length;
+      return (positionStates || [])
+        .map(state => {
+          // Validate and normalize node (fixes invalid nodes like "8-13")
+          const validatedNode = validateAndNormalizeNode(state.current_node);
+          
+          // Count completed trades for this symbol group
+          const symbolTrades = alerts.filter(a => a.symbol.toUpperCase() === state.group_key);
+          const tradesAtNode = symbolTrades.filter(t => 
+            t.status === 'completed' && t.outcome
+          ).length;
 
-        return {
-          symbol: state.group_key, // Currency pair (e.g., USDJPY, XAUUSD)
-          node: validatedNode, // Current decision tree node (validated)
-          risk: getRiskPercentForNode(validatedNode), // Risk percentage for this node (uses centralized function)
-          tradesAtNode, // Number of completed trades at this node
-          lastUpdated: state.updated_at
-        };
-      });
+          return {
+            symbol: state.group_key, // Currency pair (e.g., USDJPY, XAUUSD)
+            node: validatedNode, // Current decision tree node (validated)
+            risk: getRiskPercentForNode(validatedNode), // Risk percentage for this node (uses centralized function)
+            tradesAtNode, // Number of completed trades at this node
+            lastUpdated: state.updated_at
+          };
+        })
+        .filter(progression => progression.tradesAtNode > 0); // Only show pairs with completed trades
     } catch (error) {
       console.error('Error calculating risk progression:', error);
       return [];

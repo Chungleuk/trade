@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { TradingAnalytics, AnalyticsFilters } from '../types/analytics';
 import { AnalyticsService } from '../services/analyticsService';
+import { fixAllInvalidNodes } from '../services/positionSizingService';
 
 // Register Chart.js components
 ChartJS.register(
@@ -51,6 +52,20 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
   useEffect(() => {
     fetchAnalytics();
   }, [filters, refreshTrigger]); // Add refreshTrigger to dependencies
+
+  // Auto-fix invalid nodes on dashboard load
+  useEffect(() => {
+    const fixInvalidNodes = async () => {
+      try {
+        await fixAllInvalidNodes();
+        // Refresh analytics after fixing
+        fetchAnalytics();
+      } catch (err) {
+        console.error('Error fixing invalid nodes:', err);
+      }
+    };
+    fixInvalidNodes();
+  }, []); // Run once on mount
 
   const fetchAnalytics = async () => {
     setLoading(true);
@@ -290,8 +305,26 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
 
         {/* Risk Progression Table */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Risk Progression by Currency Pair</h3>
-          <p className="text-sm text-gray-600 mb-4">Current decision tree node and risk level for each currency pair</p>
+          <div className="flex justify-between items-center mb-4">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">Risk Progression by Currency Pair</h3>
+              <p className="text-sm text-gray-600 mt-1">Current decision tree node and risk level for each currency pair</p>
+            </div>
+            <button
+              onClick={async () => {
+                try {
+                  await fixAllInvalidNodes();
+                  await fetchAnalytics();
+                } catch (err) {
+                  console.error('Error fixing invalid nodes:', err);
+                }
+              }}
+              className="px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100 transition-colors flex items-center"
+            >
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Fix Invalid Nodes
+            </button>
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">

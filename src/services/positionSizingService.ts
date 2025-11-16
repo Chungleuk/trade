@@ -41,13 +41,51 @@ export function getGroupKeyForSymbol(symbol: string): string {
   return symbol?.toUpperCase() ?? 'UNKNOWN';
 }
 
+// Validate and normalize node - resets invalid nodes to 'Start'
+export function validateAndNormalizeNode(node: string): string {
+  if (!node || node === 'Start') return 'Start';
+  
+  const match = node.match(/^(\d+)-(\d+)$/);
+  if (!match) {
+    console.warn(`[Position Sizing] Invalid node format "${node}", resetting to Start`);
+    return 'Start';
+  }
+  
+  const wins = parseInt(match[1], 10);
+  const losses = parseInt(match[2], 10);
+  
+  // Check if node exceeds decision tree limits (max 4 wins or 5 losses)
+  if (wins > 4 || losses > 5) {
+    console.warn(`[Position Sizing] Node "${node}" exceeds limits (wins: ${wins} > 4 or losses: ${losses} > 5), resetting to Start`);
+    return 'Start';
+  }
+  
+  // Check if node exists in decision tree
+  if (!decisionNodeToRiskPercent[node]) {
+    console.warn(`[Position Sizing] Node "${node}" not found in decision tree, resetting to Start`);
+    return 'Start';
+  }
+  
+  return node;
+}
+
 export async function getCurrentNode(groupKey: string): Promise<string> {
   const { data } = await supabase
     .from('position_sizing_state')
     .select('*')
     .eq('group_key', groupKey)
     .maybeSingle();
-  return data?.current_node ?? 'Start';
+  
+  const node = data?.current_node ?? 'Start';
+  const validatedNode = validateAndNormalizeNode(node);
+  
+  // Auto-fix invalid nodes in database
+  if (validatedNode !== node) {
+    console.log(`[Position Sizing] Auto-fixing invalid node "${node}" -> "${validatedNode}" for ${groupKey}`);
+    await upsertNode(groupKey, validatedNode);
+  }
+  
+  return validatedNode;
 }
 
 export function getRiskPercentForNode(node: string): number {
@@ -55,9 +93,45 @@ export function getRiskPercentForNode(node: string): number {
 }
 
 export async function upsertNode(groupKey: string, node: string): Promise<void> {
+  // Validate node before saving
+  const validatedNode = validateAndNormalizeNode(node);
   await supabase
     .from('position_sizing_state')
-    .upsert({ group_key: groupKey, current_node: node });
+    .upsert({ group_key: groupKey, current_node: validatedNode });
+}
+
+// Fix all invalid nodes in the database (utility function)
+export async function fixAllInvalidNodes(): Promise<void> {
+  try {
+    const { data: allStates, error } = await supabase
+      .from('position_sizing_state')
+      .select('*');
+    
+    if (error) {
+      console.error('[Position Sizing] Error fetching nodes for validation:', error);
+      return;
+    }
+    
+    if (!allStates || allStates.length === 0) return;
+    
+    let fixedCount = 0;
+    for (const state of allStates) {
+      const validatedNode = validateAndNormalizeNode(state.current_node);
+      if (validatedNode !== state.current_node) {
+        console.log(`[Position Sizing] Fixing invalid node "${state.current_node}" -> "${validatedNode}" for ${state.group_key}`);
+        await upsertNode(state.group_key, validatedNode);
+        fixedCount++;
+      }
+    }
+    
+    if (fixedCount > 0) {
+      console.log(`[Position Sizing] Fixed ${fixedCount} invalid node(s) in database`);
+    } else {
+      console.log('[Position Sizing] All nodes are valid');
+    }
+  } catch (error) {
+    console.error('[Position Sizing] Error fixing invalid nodes:', error);
+  }
 }
 
 // Advance node according to outcome: increment wins or losses in the node key "W-L"

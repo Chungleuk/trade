@@ -1,7 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { TradingAnalytics, SymbolPerformance, MonthlyPerformance, RiskProgression, AnalyticsFilters } from '../types/analytics';
 import { TradingAlert } from '../types/alert';
-import { getRiskPercentForNode } from './positionSizingService';
+import { getRiskPercentForNode, validateAndNormalizeNode } from './positionSizingService';
 
 export class AnalyticsService {
   static async getTradingAnalytics(filters?: AnalyticsFilters): Promise<TradingAnalytics> {
@@ -190,6 +190,9 @@ export class AnalyticsService {
       }
 
       return (positionStates || []).map(state => {
+        // Validate and normalize node (fixes invalid nodes like "8-13")
+        const validatedNode = validateAndNormalizeNode(state.current_node);
+        
         // Count completed trades for this symbol group
         const symbolTrades = alerts.filter(a => a.symbol.toUpperCase() === state.group_key);
         const tradesAtNode = symbolTrades.filter(t => 
@@ -198,8 +201,8 @@ export class AnalyticsService {
 
         return {
           symbol: state.group_key, // Currency pair (e.g., USDJPY, XAUUSD)
-          node: state.current_node, // Current decision tree node
-          risk: getRiskPercentForNode(state.current_node), // Risk percentage for this node (uses centralized function)
+          node: validatedNode, // Current decision tree node (validated)
+          risk: getRiskPercentForNode(validatedNode), // Risk percentage for this node (uses centralized function)
           tradesAtNode, // Number of completed trades at this node
           lastUpdated: state.updated_at
         };

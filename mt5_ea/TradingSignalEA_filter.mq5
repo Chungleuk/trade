@@ -42,6 +42,16 @@ input bool AccountForBrokerCosts = true;   // Include commission and spread in c
 input bool AdjustTargetForCosts = true;    // Adjust TP to maintain 1:1 R:R after costs (RECOMMENDED)
 input bool ForceOneToOneRR = true;         // Force 1:1 R:R by adjusting target to match stop distance
 
+// Signal Filter Settings
+input bool EnableSignalFilter = true;           // Enable higher timeframe and win rate filtering
+input int FilterHTFTimeframe = 60;              // Higher timeframe for confirmation (60 = H1, 240 = H4, etc.)
+input double MinWinRateThreshold = 0.55;        // Minimum win rate threshold (55%)
+input bool AllowFirstTrades = true;             // Allow trades if no historical data yet
+input double HTFTrendTolerance = 0.0;           // Custom tolerance (0 = auto per symbol)
+input int WinRateHistoryDays = 30;              // Number of days to consider when calculating win rate (0 = entire history)
+input int WinRateUpdateIntervalSeconds = 300;   // Interval for refreshing win rate stats (seconds)
+input int GlobalLockTimeoutSeconds = 10;        // Timeout for global signal lock (seconds, 0 = disable)
+
 // Email notifications
 input bool SendEmailNotifications = true;
 input string EmailAddress = "leechungleuk@gmail.com";
@@ -79,6 +89,28 @@ string recentSymbols[];
 datetime recentSymbolsTimes[];
 int recentSymbolsCount = 0;
 
+void CleanupRecentSymbols() {
+   if(DuplicateCheckWindow <= 0 || recentSymbolsCount == 0)
+      return;
+
+   datetime cutoff = TimeGMT() - DuplicateCheckWindow;
+   int writeIndex = 0;
+
+   for(int i = 0; i < recentSymbolsCount; i++) {
+      if(recentSymbolsTimes[i] >= cutoff) {
+         if(writeIndex != i) {
+            recentSymbols[writeIndex] = recentSymbols[i];
+            recentSymbolsTimes[writeIndex] = recentSymbolsTimes[i];
+         }
+         writeIndex++;
+      }
+   }
+
+   recentSymbolsCount = writeIndex;
+   ArrayResize(recentSymbols, writeIndex);
+   ArrayResize(recentSymbolsTimes, writeIndex);
+}
+
 struct SignalRetry {
    string signalId;
    int retryCount;
@@ -86,6 +118,15 @@ struct SignalRetry {
 };
 SignalRetry signalRetries[];
 int signalRetriesCount = 0;
+
+// Win rate tracking for signal filtering
+struct TradeStats {
+   int total_trades;
+   int winning_trades;
+   double win_rate;
+   datetime last_update;
+};
+TradeStats filterStats = {0, 0, 0.0, 0};
 
 enum ConnectionState {
    DISCONNECTED,
@@ -348,6 +389,18 @@ int OnInit() {
    EventSetMillisecondTimer(100);
    UpdateActiveSymbols();
    Print("TradingSignalEA: Found ", activeSymbolsCount, " symbols with active positions");
+   
+   // Initialize win rate statistics for filtering
+   if(EnableSignalFilter) {
+      datetime endTime = TimeCurrent();
+      datetime startTime = (WinRateHistoryDays > 0) ? (endTime - (WinRateHistoryDays * 86400)) : 0;
+      if(!HistorySelect(startTime, endTime)) {
+         Print("TradingSignalEA: WARNING - Could not load trade history during initialization (win rate stats may be delayed)");
+      }
+      UpdateWinRateStats();
+      Print("TradingSignalEA: Filter enabled - Win rate stats initialized");
+   }
+   
    Print("TradingSignalEA: Initialized successfully. Connection state: ", connectionManager.GetStateString());
    return INIT_SUCCEEDED;
 }
@@ -466,6 +519,11 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    if(UpdateTradeOutcomeWithSymbol(positionId, symbol, outcome)) {
       MarkTradeOutcomeProcessed(positionId);
       Print("TradingSignalEA: Trade closure processed successfully - Email sent");
+      
+      // Update win rate statistics for filtering
+      if(EnableSignalFilter) {
+         UpdateWinRateStats();
+      }
    } else {
       Print("TradingSignalEA: ERROR - Failed to process trade closure");
    }
@@ -541,6 +599,13 @@ void OnTimer() {
    if(TimeGMT() - lastTradeCheck >= tradeCheckInterval) {
       CheckAndUpdateTradeOutcomes();
       UpdateActiveSymbols();
+      
+      // Update win rate statistics periodically
+      if(EnableSignalFilter && WinRateUpdateIntervalSeconds > 0 &&
+         (TimeGMT() - filterStats.last_update) >= WinRateUpdateIntervalSeconds) {
+         UpdateWinRateStats();
+      }
+      
       lastTradeCheck = TimeGMT();
    }
    
@@ -976,6 +1041,9 @@ void ProcessSingleSignal(const TradingSignal &signal) {
                return;
             }
 
+            // Cleanup expired duplicate entries before checking window
+            CleanupRecentSymbols();
+
             // Enforce DuplicateCheckWindow per symbol (skip if same symbol recently queued)
             for(int i = 0; i < recentSymbolsCount; i++) {
                if(recentSymbols[i] == signal.symbol) {
@@ -992,7 +1060,8 @@ void ProcessSingleSignal(const TradingSignal &signal) {
       // GLOBAL SIGNAL LOCK - prevents any signal processing during execution
       if(globalSignalLock != "") {
          int lockAge = (int)(TimeGMT() - globalSignalLockTime);
-         if(lockAge < 10) {
+         bool lockActive = (GlobalLockTimeoutSeconds > 0) ? (lockAge < GlobalLockTimeoutSeconds) : false;
+         if(lockActive) {
             Print("TradingSignalEA: Global signal lock active (", globalSignalLock, ") - skipping ", signal.id);
             return;
          } else {
@@ -1005,6 +1074,34 @@ void ProcessSingleSignal(const TradingSignal &signal) {
       if(signalQueue.ContainsId(signal.id)) {
          Print("TradingSignalEA: Signal ", signal.id, " already queued - skipping");
          return;
+      }
+      
+      // FILTER CHECK: Higher timeframe and win rate validation
+      if(EnableSignalFilter) {
+         Print("TradingSignalEA: ========================================");
+         Print("TradingSignalEA: FILTER CHECK for signal: ", signal.id);
+         Print("TradingSignalEA: ========================================");
+         
+         // Step 1: Check higher timeframe confirmation
+         if(!ConfirmWithHigherTimeframe(signal)) {
+            Print("TradingSignalEA: Signal ", signal.id, " REJECTED by filter - HTF confirmation failed");
+            SendSignalAck(signal.id, "rejected", "HTF confirmation failed");
+            RemoveActiveSymbol(signal.symbol);
+            RemoveSignalFromProcessedList(signal.id);
+            return;
+         }
+         
+         // Step 2: Check win rate threshold
+         if(!CheckWinRateThreshold()) {
+            Print("TradingSignalEA: Signal ", signal.id, " REJECTED by filter - Win rate below threshold");
+            SendSignalAck(signal.id, "rejected", "Win rate below threshold");
+            RemoveActiveSymbol(signal.symbol);
+            RemoveSignalFromProcessedList(signal.id);
+            return;
+         }
+         
+         Print("TradingSignalEA: Signal ", signal.id, " PASSED filter checks - proceeding to execution");
+         Print("TradingSignalEA: ========================================");
       }
       
       // Acquire global lock
@@ -1183,6 +1280,191 @@ bool ValidateSignal(const TradingSignal& signal) {
    }
    
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Determine HTF trend tolerance per symbol                          |
+//+------------------------------------------------------------------+
+double GetHTFTrendTolerance(const string symbol) {
+   if(HTFTrendTolerance > 0.0)
+      return HTFTrendTolerance;
+
+   string upperSymbol = symbol;
+   StringToUpper(upperSymbol);
+
+   if(upperSymbol == "XAUUSD" || upperSymbol == "XAGUSD")
+      return 0.50;      // $0.50 = 50 pips for metals
+
+   if(StringFind(upperSymbol, "JPY") >= 0)
+      return 0.05;      // 5 pips for JPY pairs
+
+   return 0.0005;       // 5 pips for standard forex pairs
+}
+
+//+------------------------------------------------------------------+
+//| Confirm signal with higher timeframe analysis                     |
+//+------------------------------------------------------------------+
+bool ConfirmWithHigherTimeframe(const TradingSignal& signal) {
+   if(!EnableSignalFilter) return true; // Filter disabled, allow all
+   
+   // Ensure symbol is available
+   if(!SymbolSelect(signal.symbol, true)) {
+      Print("TradingSignalEA: Filter - Cannot select symbol: ", signal.symbol);
+      return false;
+   }
+   
+   // Get HTF timeframe
+   ENUM_TIMEFRAMES htf = (ENUM_TIMEFRAMES)FilterHTFTimeframe;
+   
+   // Get current HTF candles (only need close prices for trend check)
+   double htf_close_0 = iClose(signal.symbol, htf, 0);  // Current candle
+   double htf_close_1 = iClose(signal.symbol, htf, 1);  // Previous candle
+   
+   if(htf_close_0 <= 0 || htf_close_1 <= 0) {
+      Print("TradingSignalEA: Filter - Invalid HTF prices for ", signal.symbol);
+      return false;
+   }
+   
+   // Determine tolerance based on symbol (with optional override)
+   double tolerance = GetHTFTrendTolerance(signal.symbol);
+   
+   // Check if price difference is significant enough to consider it a trend
+   // If difference is too small, treat as ranging market and reject
+   double priceDiff = MathAbs(htf_close_0 - htf_close_1);
+   
+   if(priceDiff < tolerance) {
+      Print("TradingSignalEA: Filter - HTF ranging market detected (price difference: ", priceDiff, 
+            " < tolerance: ", tolerance, ")");
+      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+      Print("TradingSignalEA: Filter - Signal REJECTED - No clear HTF trend (ranging market)");
+      return false;
+   }
+   
+   // Simple HTF trend confirmation logic (less strict - only checks trend direction)
+   // Price difference is significant, so we can determine trend direction
+   bool htf_uptrend = (htf_close_0 - htf_close_1) >= tolerance;
+   bool htf_downtrend = (htf_close_1 - htf_close_0) >= tolerance;
+   
+   bool confirmed = false;
+   
+   if(signal.action == ORDER_TYPE_BUY && htf_uptrend) {
+      // For BUY signals, we want HTF uptrend (less strict - no entry price check)
+      Print("TradingSignalEA: Filter - BUY signal confirmed by HTF uptrend");
+      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+      confirmed = true;
+   }
+   else if(signal.action == ORDER_TYPE_SELL && htf_downtrend) {
+      // For SELL signals, we want HTF downtrend (less strict - no entry price check)
+      Print("TradingSignalEA: Filter - SELL signal confirmed by HTF downtrend");
+      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+      confirmed = true;
+   }
+   else {
+      Print("TradingSignalEA: Filter - Signal REJECTED - HTF trend mismatch");
+      Print("TradingSignalEA: Filter - Action: ", EnumToString(signal.action), 
+            " HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+   }
+   
+   return confirmed;
+}
+
+//+------------------------------------------------------------------+
+//| Check win rate threshold                                          |
+//+------------------------------------------------------------------+
+bool CheckWinRateThreshold() {
+   if(!EnableSignalFilter) return true; // Filter disabled, allow all
+   
+   // Recalculate win rate from stats
+   if(filterStats.total_trades == 0) {
+      if(AllowFirstTrades) {
+         Print("TradingSignalEA: Filter - No historical trades. Allowing trade (AllowFirstTrades enabled).");
+         return true;  // Allow first trades
+      } else {
+         Print("TradingSignalEA: Filter - No historical trades. Rejecting trade (AllowFirstTrades disabled).");
+         return false;
+      }
+   }
+   
+   filterStats.win_rate = (double)filterStats.winning_trades / filterStats.total_trades;
+   
+   Print("TradingSignalEA: Filter - Current Win Rate: ", DoubleToString(filterStats.win_rate * 100, 2), 
+         "% (", filterStats.winning_trades, "/", filterStats.total_trades, " trades)");
+   Print("TradingSignalEA: Filter - Required Win Rate: ", DoubleToString(MinWinRateThreshold * 100, 2), "%");
+   
+   if(filterStats.win_rate >= MinWinRateThreshold) {
+      Print("TradingSignalEA: Filter - Win rate PASSED threshold: ", DoubleToString(filterStats.win_rate * 100, 2), "%");
+      return true;
+   }
+   else {
+      Print("TradingSignalEA: Filter - Win rate FAILED threshold. Current: ", DoubleToString(filterStats.win_rate * 100, 2),
+            "% Required: ", DoubleToString(MinWinRateThreshold * 100, 2), "%");
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Update win rate statistics from trade history                     |
+//+------------------------------------------------------------------+
+void UpdateWinRateStats() {
+   if(!EnableSignalFilter)
+      return;
+
+   datetime endTime = TimeCurrent();
+   datetime startTime = (WinRateHistoryDays > 0) ? (endTime - (WinRateHistoryDays * 86400)) : 0;
+
+   if(!HistorySelect(startTime, endTime)) {
+      Print("TradingSignalEA: WARNING - Failed to select trade history for win rate calculation");
+      return;
+   }
+
+   int totalTrades = 0;
+   int winningTrades = 0;
+   
+   // Check history for closed trades with our magic number
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket <= 0)
+         continue;
+
+      datetime dealTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+      if(startTime > 0 && dealTime < startTime)
+         break; // Remaining deals are older than the cutoff
+
+      if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != MagicNumber)
+         continue;
+
+      ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+      
+      // Check for position close deals (out deals)
+      if(dealType == DEAL_TYPE_SELL || dealType == DEAL_TYPE_BUY) {
+         ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+         
+         if(dealEntry == DEAL_ENTRY_OUT) {
+            // This is a closed position
+            double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+            double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+            double commission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+            double netProfit = profit + swap + commission;
+            
+            totalTrades++;
+            if(netProfit > 0) {
+               winningTrades++;
+            }
+         }
+      }
+   }
+   
+   filterStats.total_trades = totalTrades;
+   filterStats.winning_trades = winningTrades;
+   if(totalTrades > 0) {
+      filterStats.win_rate = (double)winningTrades / totalTrades;
+   } else {
+      filterStats.win_rate = 0.0;
+   }
+   filterStats.last_update = TimeGMT();
+   
+   Print("TradingSignalEA: Filter - Win rate stats updated: ", winningTrades, "/", totalTrades, 
+         " = ", DoubleToString(filterStats.win_rate * 100, 2), "%");
 }
 
 //+------------------------------------------------------------------+
@@ -1456,8 +1738,9 @@ double CalculateLotSize(const TradingSignal& signal, double actualEntryPrice = 0
    if(maxLot <= 0) maxLot = 100.0;
    if(lotStep <= 0) lotStep = 0.01;
    
-   // Round to lot step
-   double finalLotSize = MathFloor(calculatedLotSize / lotStep) * lotStep;
+   // Round to nearest lot step
+   double roundedSteps = MathRound(calculatedLotSize / lotStep);
+   double finalLotSize = roundedSteps * lotStep;
    
    // Apply min/max constraints
    if(finalLotSize < minLot) {
@@ -2382,6 +2665,11 @@ void CheckAndUpdateTradeOutcomes() {
                      if(UpdateTradeOutcomeWithSymbol(positionTicket, symbol, outcome)) {
                         MarkTradeOutcomeProcessed(positionTicket);
                         Print("TradingSignalEA: Trade closure processed successfully - Email sent");
+                        
+                        // Update win rate statistics for filtering
+                        if(EnableSignalFilter) {
+                           UpdateWinRateStats();
+                        }
                      } else {
                         Print("TradingSignalEA: ERROR - Failed to process trade closure");
                      }
@@ -2608,11 +2896,14 @@ void MarkTradeOutcomeProcessed(ulong ticket) {
 //| Send email notification with error handling                      |
 //+------------------------------------------------------------------+
 void SendTradeEmail(string subject, string body) {
-  if(!SendEmailNotifications || EmailAddress == "") return;
+  if(!SendEmailNotifications) return;
   if(!SendMail(subject, body)) {
-    Print("TradingSignalEA: Failed to send email notification");
+    Print("TradingSignalEA: Failed to send email notification - ensure MT5 email settings are configured (Tools → Options → Email)");
   } else {
-    Print("TradingSignalEA: Email notification sent to ", EmailAddress);
+    if(EmailAddress != "")
+       Print("TradingSignalEA: Email notification sent (configured recipient: ", EmailAddress, ")");
+    else
+       Print("TradingSignalEA: Email notification sent via terminal email configuration");
   }
 }
 

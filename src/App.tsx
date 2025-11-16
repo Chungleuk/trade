@@ -6,6 +6,8 @@ import { AlertsList } from './components/AlertsList';
 import { StatusNotification } from './components/StatusNotification';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { useWebhookAlerts } from './hooks/useWebhookAlerts';
+import { AlertService } from './services/alertService';
+import { cleanupOrphanedNodes } from './services/positionSizingService';
 
 function App() {
   const { 
@@ -80,6 +82,36 @@ function App() {
     }
   };
 
+  const handleDeleteByGroup = async (symbol: string) => {
+    try {
+      const { deletedCount, error } = await AlertService.deleteAlertsBySymbol(symbol);
+      
+      if (error) {
+        showNotification(`Failed to delete alerts: ${error}`, 'error');
+        return;
+      }
+      
+      if (deletedCount === 0) {
+        showNotification(`No alerts found for ${symbol}`, 'info');
+        return;
+      }
+      
+      // Clean up orphaned position sizing state
+      await cleanupOrphanedNodes();
+      
+      // Refresh alerts
+      await fetchAlerts();
+      
+      // Trigger analytics refresh
+      setAnalyticsRefreshTrigger(prev => prev + 1);
+      
+      showNotification(`Successfully deleted ${deletedCount} alert(s) for ${symbol}`, 'success');
+    } catch (err) {
+      console.error('Error deleting alerts by group:', err);
+      showNotification('Failed to delete alerts by group', 'error');
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -142,6 +174,7 @@ function App() {
               onUpdateStatus={handleUpdateStatus}
               onMarkOutcome={handleMarkOutcome}
               onDelete={handleDeleteAlert}
+              onDeleteByGroup={handleDeleteByGroup}
             />
           </div>
         )}

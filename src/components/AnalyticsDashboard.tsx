@@ -16,11 +16,11 @@ import {
 } from 'chart.js';
 import { 
   TrendingUp, TrendingDown, Target, AlertTriangle, DollarSign, 
-  Calendar, Filter, RefreshCw, BarChart3, PieChart as PieChartIcon 
+  Calendar, Filter, RefreshCw, BarChart3, PieChart as PieChartIcon, RotateCcw 
 } from 'lucide-react';
 import { TradingAnalytics, AnalyticsFilters } from '../types/analytics';
 import { AnalyticsService } from '../services/analyticsService';
-import { fixAllInvalidNodes, cleanupOrphanedNodes } from '../services/positionSizingService';
+import { fixAllInvalidNodes, cleanupOrphanedNodes, resetNodeToStart } from '../services/positionSizingService';
 
 // Register Chart.js components
 ChartJS.register(
@@ -48,6 +48,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
     symbols: [],
     status: ['active', 'completed', 'stopped']
   });
+  const [resettingSymbol, setResettingSymbol] = useState<string | null>(null);
 
   useEffect(() => {
     fetchAnalytics();
@@ -79,6 +80,37 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
       setError(err instanceof Error ? err.message : 'Failed to fetch analytics');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleResetToStart = async (symbol: string, currentNode: string) => {
+    // Double confirmation
+    const firstConfirm = window.confirm(
+      `Are you sure you want to reset ${symbol} decision node from "${currentNode}" to "Start" (0.65% risk)?`
+    );
+    
+    if (!firstConfirm) return;
+    
+    const secondConfirm = window.confirm(
+      `Final confirmation: Reset ${symbol} to "Start" node? This will change the risk from ${analytics?.riskProgression.find(p => p.symbol === symbol)?.risk.toFixed(2)}% to 0.65%.`
+    );
+    
+    if (!secondConfirm) return;
+    
+    setResettingSymbol(symbol);
+    try {
+      const { error } = await resetNodeToStart(symbol);
+      if (error) {
+        alert(`Failed to reset ${symbol}: ${error}`);
+      } else {
+        // Refresh analytics to show updated node
+        await fetchAnalytics();
+      }
+    } catch (err) {
+      console.error('Error resetting node:', err);
+      alert(`Failed to reset ${symbol}. Please try again.`);
+    } finally {
+      setResettingSymbol(null);
     }
   };
 
@@ -335,7 +367,7 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
                     Currency Pair
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Decision Node
+                    Decision Node (win-loss)
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Risk %
@@ -343,27 +375,60 @@ export const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ refreshT
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Completed Trades
                   </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {analytics.riskProgression.map((progression) => (
-                  <tr key={progression.symbol}>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      {progression.symbol}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {progression.node}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <span className="font-medium text-orange-600">
-                        {progression.risk.toFixed(2)}%
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {progression.tradesAtNode}
-                    </td>
-                  </tr>
-                ))}
+                {analytics.riskProgression.map((progression) => {
+                  const isResetting = resettingSymbol === progression.symbol;
+                  const isAtStart = progression.node === 'Start';
+                  return (
+                    <tr key={progression.symbol}>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        {progression.symbol}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {progression.node}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <span className="font-medium text-orange-600">
+                          {progression.risk.toFixed(2)}%
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {progression.tradesAtNode}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <button
+                          onClick={() => handleResetToStart(progression.symbol, progression.node)}
+                          disabled={isResetting || isAtStart}
+                          className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                            isAtStart
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                              : isResetting
+                              ? 'bg-blue-100 text-blue-600 cursor-wait'
+                              : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'
+                          }`}
+                          title={isAtStart ? 'Already at Start node' : 'Reset to Start (0.65% risk)'}
+                        >
+                          {isResetting ? (
+                            <>
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              Resetting...
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-3 h-3" />
+                              Reset
+                            </>
+                          )}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

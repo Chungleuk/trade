@@ -299,6 +299,48 @@ export class AlertService {
     }
   }
 
+  // Delete all alerts by symbol/group
+  static async deleteAlertsBySymbol(symbol: string): Promise<{ deletedCount: number; error: string | null }> {
+    try {
+      console.log('Attempting to delete all alerts for symbol:', symbol);
+      
+      // First, get count of alerts to be deleted
+      const { data: alertsToDelete, error: fetchError } = await supabase
+        .from('trading_alerts')
+        .select('id')
+        .eq('symbol', symbol.toUpperCase());
+
+      if (fetchError) {
+        console.error('Error fetching alerts to delete:', fetchError);
+        return { deletedCount: 0, error: fetchError.message };
+      }
+
+      const count = alertsToDelete?.length || 0;
+      
+      if (count === 0) {
+        console.log('No alerts found for symbol:', symbol);
+        return { deletedCount: 0, error: null };
+      }
+
+      // Delete all alerts for this symbol
+      const { error } = await supabase
+        .from('trading_alerts')
+        .delete()
+        .eq('symbol', symbol.toUpperCase());
+
+      if (error) {
+        console.error('Error deleting alerts by symbol:', error);
+        return { deletedCount: 0, error: error.message };
+      }
+
+      console.log(`Successfully deleted ${count} alert(s) for symbol:`, symbol);
+      return { deletedCount: count, error: null };
+    } catch (error) {
+      console.error('Error in deleteAlertsBySymbol:', error);
+      return { deletedCount: 0, error: 'Failed to delete alerts by symbol' };
+    }
+  }
+
   // Get alert statistics
   static async getAlertStats(): Promise<{
     data: {

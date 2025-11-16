@@ -100,6 +100,19 @@ export async function upsertNode(groupKey: string, node: string): Promise<void> 
     .upsert({ group_key: groupKey, current_node: validatedNode });
 }
 
+// Reset node to Start for a specific currency pair
+export async function resetNodeToStart(groupKey: string): Promise<{ error: string | null }> {
+  try {
+    console.log(`[Position Sizing] Resetting node to Start for ${groupKey}`);
+    await upsertNode(groupKey, 'Start');
+    console.log(`[Position Sizing] Successfully reset ${groupKey} to Start (0.65% risk)`);
+    return { error: null };
+  } catch (error) {
+    console.error(`[Position Sizing] Error resetting node for ${groupKey}:`, error);
+    return { error: 'Failed to reset node to Start' };
+  }
+}
+
 // Fix all invalid nodes in the database (utility function)
 export async function fixAllInvalidNodes(): Promise<void> {
   try {

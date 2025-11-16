@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Search, Filter, TrendingUp, AlertTriangle, RefreshCw, Loader2, Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { Search, Filter, TrendingUp, AlertTriangle, RefreshCw, Loader2, Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Trash2 } from 'lucide-react';
 import { TradingAlert } from '../types/alert';
 import { AlertCard } from './AlertCard';
 
@@ -11,6 +11,7 @@ interface AlertsListProps {
   onUpdateStatus?: (alertId: string, status: 'active' | 'completed' | 'stopped') => void;
   onMarkOutcome?: (alertId: string, outcome: 'win' | 'loss') => void;
   onDelete?: (alertId: string) => void;
+  onDeleteByGroup?: (symbol: string) => Promise<void>;
 }
 
 export const AlertsList: React.FC<AlertsListProps> = ({ 
@@ -20,7 +21,8 @@ export const AlertsList: React.FC<AlertsListProps> = ({
   onRefresh, 
   onUpdateStatus, 
   onMarkOutcome,
-  onDelete 
+  onDelete,
+  onDeleteByGroup
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterAction, setFilterAction] = useState<'ALL' | 'BUY' | 'SELL'>('ALL');
@@ -29,6 +31,8 @@ export const AlertsList: React.FC<AlertsListProps> = ({
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(100);
+  const [deleteGroupDropdownOpen, setDeleteGroupDropdownOpen] = useState(false);
+  const [deletingGroup, setDeletingGroup] = useState<string | null>(null);
 
   const allGroups = useMemo(() => {
     const set = new Set<string>();
@@ -59,6 +63,24 @@ export const AlertsList: React.FC<AlertsListProps> = ({
   React.useEffect(() => {
     setCurrentPage(1);
   }, [searchTerm, filterAction, filterStatus, selectedGroups, itemsPerPage]);
+
+  // Close dropdowns when clicking outside
+  React.useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('.delete-group-dropdown') && !target.closest('[data-delete-group-button]')) {
+        setDeleteGroupDropdownOpen(false);
+      }
+      if (!target.closest('.group-filter-dropdown') && !target.closest('[data-group-filter-button]')) {
+        setGroupDropdownOpen(false);
+      }
+    };
+
+    if (deleteGroupDropdownOpen || groupDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [deleteGroupDropdownOpen, groupDropdownOpen]);
 
   const goToPage = (page: number) => {
     setCurrentPage(Math.max(1, Math.min(page, totalPages)));
@@ -281,6 +303,7 @@ export const AlertsList: React.FC<AlertsListProps> = ({
           <div className="relative">
             <button
               type="button"
+              data-group-filter-button
               onClick={() => setGroupDropdownOpen(v => !v)}
               className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm"
               title="Filter by symbol group"
@@ -295,7 +318,7 @@ export const AlertsList: React.FC<AlertsListProps> = ({
             </button>
 
             {groupDropdownOpen && (
-              <div className="absolute z-10 mt-2 w-56 bg-white border border-gray-200 rounded-lg shadow-lg p-2">
+              <div className="group-filter-dropdown absolute z-10 mt-2 w-56 bg-white border border-gray-200 rounded-lg shadow-lg p-2">
                 <div className="flex items-center justify-between px-2 py-1">
                   <span className="text-xs font-medium text-gray-600">Select groups</span>
                   <button
@@ -354,6 +377,78 @@ export const AlertsList: React.FC<AlertsListProps> = ({
               <option value="stopped">Stopped</option>
             </select>
           </div>
+
+          {onDeleteByGroup && (
+            <div className="relative">
+              <button
+                type="button"
+                data-delete-group-button
+                onClick={() => setDeleteGroupDropdownOpen(v => !v)}
+                className="inline-flex items-center gap-2 px-3 py-2 border border-red-300 text-red-700 bg-white rounded-lg hover:bg-red-50 text-sm font-medium transition-colors"
+                title="Delete all alerts by currency pair"
+              >
+                <Trash2 className="w-4 h-4" />
+                Delete by Group
+              </button>
+
+              {deleteGroupDropdownOpen && (
+                <div className="delete-group-dropdown absolute z-10 mt-2 right-0 w-56 bg-white border border-gray-200 rounded-lg shadow-lg p-2">
+                  <div className="flex items-center justify-between px-2 py-1 border-b border-gray-200 mb-2">
+                    <span className="text-xs font-medium text-gray-600">Select group to delete</span>
+                    <button
+                      type="button"
+                      onClick={() => setDeleteGroupDropdownOpen(false)}
+                      className="text-xs text-gray-500 hover:text-gray-700"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="max-h-56 overflow-auto">
+                    {allGroups.length === 0 && (
+                      <div className="px-2 py-1 text-sm text-gray-500">No symbols</div>
+                    )}
+                    {allGroups.map(group => {
+                      const groupAlertsCount = alerts.filter(a => a.symbol.toUpperCase() === group).length;
+                      const isDeleting = deletingGroup === group;
+                      return (
+                        <button
+                          type="button"
+                          key={group}
+                          onClick={async () => {
+                            if (window.confirm(`Are you sure you want to delete all ${groupAlertsCount} alert(s) for ${group}? This action cannot be undone.`)) {
+                              setDeletingGroup(group);
+                              try {
+                                await onDeleteByGroup(group);
+                                setDeleteGroupDropdownOpen(false);
+                              } catch (err) {
+                                console.error('Error deleting group:', err);
+                              } finally {
+                                setDeletingGroup(null);
+                              }
+                            }
+                          }}
+                          disabled={isDeleting}
+                          className={`w-full flex items-center justify-between px-2 py-2 text-sm rounded hover:bg-red-50 transition-colors ${
+                            isDeleting ? 'opacity-50 cursor-not-allowed' : 'text-red-700 hover:text-red-900'
+                          }`}
+                        >
+                          <div className="flex flex-col items-start">
+                            <span className="font-medium">{group}</span>
+                            <span className="text-xs text-gray-500">{groupAlertsCount} alert(s)</span>
+                          </div>
+                          {isDeleting ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-red-600" />
+                          ) : (
+                            <Trash2 className="w-4 h-4" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

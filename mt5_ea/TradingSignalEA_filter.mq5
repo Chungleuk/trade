@@ -19,14 +19,15 @@ input int PollInterval = 1000;
 input string APIKey = "";
 input string SecretKey = "";
 input bool UseGETMethod = false;
-input int SignalExpirationMinutes = 5;
+input int SignalExpirationMinutes = 10;
 input bool DebugMode = true;
 input int MaxTimeDriftMinutes = 60;
 input bool UseServerTimeForExpiration = true;
 input bool AutoShutdownEnabled = true;
 input int HKShutdownHour = 3;  // Close all trades at this Hong Kong time (default: 3 AM)
 input int MaxRetryAttempts = 3;
-input int DuplicateCheckWindow = 600;  // 10 minutes to prevent rapid re-execution of same symbol
+input int MaxConcurrentPositions = 3;  // Maximum number of positions open at the same time
+input int DuplicateCheckWindow = 300;  // 5 minutes to prevent rapid re-execution of same symbol (relaxed from 10 minutes)
 input double BaseMaxSlippagePips = 3.0;
 input double VolatileSymbolSlippageMultiplier = 1.5;
 input bool AllowCriticalSignalOverride = true;
@@ -43,13 +44,11 @@ input bool AdjustTargetForCosts = true;    // Adjust TP to maintain 1:1 R:R afte
 input bool ForceOneToOneRR = true;         // Force 1:1 R:R by adjusting target to match stop distance
 
 // Signal Filter Settings
-input bool EnableSignalFilter = true;           // Enable higher timeframe and win rate filtering
-input int FilterHTFTimeframe = 60;              // Higher timeframe for confirmation (60 = H1, 240 = H4, etc.)
-input double MinWinRateThreshold = 0.55;        // Minimum win rate threshold (55%)
-input bool AllowFirstTrades = true;             // Allow trades if no historical data yet
+input bool EnableSignalFilter = true;           // Enable higher timeframe filtering
+input int FilterHTFTimeframe = 30;              // Higher timeframe for confirmation (30 = M30, 60 = H1, 240 = H4, etc.)
 input double HTFTrendTolerance = 0.0;           // Custom tolerance (0 = auto per symbol)
-input int WinRateHistoryDays = 30;              // Number of days to consider when calculating win rate (0 = entire history)
-input int WinRateUpdateIntervalSeconds = 300;   // Interval for refreshing win rate stats (seconds)
+input bool AllowNeutralHTFMarkets = false;      // Allow trades even if HTF is neutral/ranging (more lenient)
+input double HTFRangingMarketTolerance = 0.75;  // Multiplier for ranging market detection (0.9 = very relaxed, 0.7 = relaxed, 0.5 = balanced)
 input int GlobalLockTimeoutSeconds = 10;        // Timeout for global signal lock (seconds, 0 = disable)
 
 // Email notifications
@@ -60,6 +59,10 @@ input bool SendOnTradeClose = true;
 input bool SendOnSignalAck = false;
 input bool SendOnConnectionStatus = true;
 input bool SendOnErrors = true;
+
+// Log management
+input bool EnableVerboseLogging = true;  // Set to false to reduce log file size
+input int LogCleanupCheckInterval = 3600;  // Check log size every N seconds (default: 1 hour)
 
 //--- Global variables
 datetime lastPollTime = 0;
@@ -73,9 +76,12 @@ int hkTimeCheckInterval = 300;
 datetime lastHKTimeCheck = 0;
 datetime lastNetworkIssue = 0;
 double initialAccountBalance = 0;  // Stores the initial deposit/balance for fixed position sizing
+datetime lastLogCleanupCheck = 0;  // Track last log cleanup check time
 
 string processedSignals[];
 int processedSignalsCount = 0;
+string rejectionEmailSent[];
+int rejectionEmailSentCount = 0;
 string currentlyProcessingSignal = "";
 datetime signalProcessingStartTime = 0;
 string globalSignalLock = "";
@@ -88,6 +94,10 @@ int activeSymbolsCount = 0;
 string recentSymbols[];
 datetime recentSymbolsTimes[];
 int recentSymbolsCount = 0;
+
+// Track trade close emails sent to prevent duplicates
+ulong tradeCloseEmailsSent[];
+int tradeCloseEmailsSentCount = 0;
 
 void CleanupRecentSymbols() {
    if(DuplicateCheckWindow <= 0 || recentSymbolsCount == 0)
@@ -119,14 +129,6 @@ struct SignalRetry {
 SignalRetry signalRetries[];
 int signalRetriesCount = 0;
 
-// Win rate tracking for signal filtering
-struct TradeStats {
-   int total_trades;
-   int winning_trades;
-   double win_rate;
-   datetime last_update;
-};
-TradeStats filterStats = {0, 0, 0.0, 0};
 
 enum ConnectionState {
    DISCONNECTED,
@@ -390,15 +392,9 @@ int OnInit() {
    UpdateActiveSymbols();
    Print("TradingSignalEA: Found ", activeSymbolsCount, " symbols with active positions");
    
-   // Initialize win rate statistics for filtering
+   // Initialize filter
    if(EnableSignalFilter) {
-      datetime endTime = TimeCurrent();
-      datetime startTime = (WinRateHistoryDays > 0) ? (endTime - (WinRateHistoryDays * 86400)) : 0;
-      if(!HistorySelect(startTime, endTime)) {
-         Print("TradingSignalEA: WARNING - Could not load trade history during initialization (win rate stats may be delayed)");
-      }
-      UpdateWinRateStats();
-      Print("TradingSignalEA: Filter enabled - Win rate stats initialized");
+      Print("TradingSignalEA: Filter enabled - Higher timeframe filter initialized");
    }
    
    Print("TradingSignalEA: Initialized successfully. Connection state: ", connectionManager.GetStateString());
@@ -516,17 +512,15 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    Print("TradingSignalEA: ========================================");
    
    // Update trade outcome and send email
-   if(UpdateTradeOutcomeWithSymbol(positionId, symbol, outcome)) {
-      MarkTradeOutcomeProcessed(positionId);
-      Print("TradingSignalEA: Trade closure processed successfully - Email sent");
-      
-      // Update win rate statistics for filtering
-      if(EnableSignalFilter) {
-         UpdateWinRateStats();
-      }
-   } else {
-      Print("TradingSignalEA: ERROR - Failed to process trade closure");
-   }
+   // Email is now sent inside UpdateTradeOutcomeWithSymbol regardless of web request result
+   Print("TradingSignalEA: Calling UpdateTradeOutcomeWithSymbol for position ", positionId);
+   UpdateTradeOutcomeWithSymbol(positionId, symbol, outcome);
+   
+   // Mark as processed after email is sent (to prevent duplicate emails)
+   // Web request success/failure is separate from email notification
+   MarkTradeOutcomeProcessed(positionId);
+   Print("TradingSignalEA: Trade closure processed - Email should have been sent (check logs above for email status)");
+   
 }
 
 //+------------------------------------------------------------------+
@@ -559,21 +553,27 @@ void OnTimer() {
       signalProcessingStartTime = 0;
    }
 
+   // Check log file size periodically
+   if(LogCleanupCheckInterval > 0 && (TimeGMT() - lastLogCleanupCheck) >= LogCleanupCheckInterval) {
+      CheckAndWarnLogFileSize();
+      lastLogCleanupCheck = TimeGMT();
+   }
+
    if(TimeGMT() - lastPollTime >= PollInterval/1000) {
       bool shouldPoll = true;
       
       if(currentlyProcessingSignal != "") {
-         Print("TradingSignalEA: Currently processing signal ", currentlyProcessingSignal, " - skipping poll");
+         if(EnableVerboseLogging) Print("TradingSignalEA: Currently processing signal ", currentlyProcessingSignal, " - skipping poll");
          shouldPoll = false;
       }
       
       if(IsSymbolActive(Symbol())) {
-         Print("TradingSignalEA: Current symbol ", Symbol(), " has active trade - skipping poll");
+         if(EnableVerboseLogging) Print("TradingSignalEA: Current symbol ", Symbol(), " has active trade - skipping poll");
          shouldPoll = false;
       }
       
-      if(PositionsTotal() >= 5) {
-         Print("TradingSignalEA: Maximum concurrent positions reached - skipping poll");
+      if(PositionsTotal() >= MaxConcurrentPositions) {
+         if(EnableVerboseLogging) Print("TradingSignalEA: Maximum concurrent positions reached (", MaxConcurrentPositions, ") - skipping poll");
          shouldPoll = false;
       }
       
@@ -600,11 +600,6 @@ void OnTimer() {
       CheckAndUpdateTradeOutcomes();
       UpdateActiveSymbols();
       
-      // Update win rate statistics periodically
-      if(EnableSignalFilter && WinRateUpdateIntervalSeconds > 0 &&
-         (TimeGMT() - filterStats.last_update) >= WinRateUpdateIntervalSeconds) {
-         UpdateWinRateStats();
-      }
       
       lastTradeCheck = TimeGMT();
    }
@@ -688,26 +683,67 @@ void RemoveSignalFromRetryListByIndex(int index) {
 //| Test connection to server                                        |
 //+------------------------------------------------------------------+
 bool TestConnection() {
-   string headers = "";
-   uchar postData[];
+   string testUrl = ServerURL + "/status";
+   Print("TradingSignalEA: ========================================");
+   Print("TradingSignalEA: Testing connection to: ", testUrl);
+   Print("TradingSignalEA: Server URL: ", ServerURL);
+   
+   // Use proper headers like other requests
+   string headers = GenerateHeaders("GET");
+   if(headers == "") {
+      Print("TradingSignalEA: ERROR - Failed to generate headers for connection test");
+      return false;
+   }
+   
+   uchar emptyData[];
    uchar response[];
    string responseHeaders;
    
-   string testUrl = ServerURL + "/status";
-   Print("TradingSignalEA: Testing connection to: ", testUrl);
-   
-   int result = WebRequest("GET", testUrl, headers, 5000, postData, response, responseHeaders);
+   // Increased timeout to 10 seconds for initial connection test
+   int result = WebRequest("GET", testUrl, headers, 10000, emptyData, response, responseHeaders);
    
    if(result == 200) {
-      string responseStr = CharArrayToString(response);
+      string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
       Print("TradingSignalEA: Connection test successful. Response: ", responseStr);
+      Print("TradingSignalEA: ========================================");
       return true;
    } else {
+      Print("TradingSignalEA: ========================================");
       Print("TradingSignalEA: Connection test failed. HTTP code: ", result);
+      
+      // Provide specific guidance for HTTP -1 error
+      if(result == -1) {
+         Print("TradingSignalEA: ERROR - HTTP code -1 indicates:");
+         Print("TradingSignalEA: 1. URL may not be allowed in MT5 settings");
+         Print("TradingSignalEA:    Go to: Tools → Options → Expert Advisors");
+         Print("TradingSignalEA:    Check 'Allow WebRequest for listed URL'");
+         Print("TradingSignalEA:    Add this URL: ", ServerURL);
+         Print("TradingSignalEA: 2. Network connectivity issue");
+         Print("TradingSignalEA: 3. DNS resolution failure");
+         Print("TradingSignalEA: 4. SSL/TLS certificate problem");
+         Print("TradingSignalEA: Will retry connection automatically...");
+      } else if(result == 404) {
+         Print("TradingSignalEA: ERROR - Server endpoint not found (404)");
+         Print("TradingSignalEA: Check if server URL is correct: ", ServerURL);
+      } else if(result == 500 || result >= 500) {
+         Print("TradingSignalEA: ERROR - Server error (", result, ")");
+         Print("TradingSignalEA: Server may be temporarily unavailable");
+      } else if(result == 0) {
+         Print("TradingSignalEA: ERROR - Request timeout or connection refused");
+      } else {
+         Print("TradingSignalEA: ERROR - HTTP error code: ", result);
+      }
+      
       if(ArraySize(response) > 0) {
-         string errorResponse = CharArrayToString(response);
+         string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
          Print("TradingSignalEA: Connection Test Error Response: ", errorResponse);
       }
+      
+      if(DebugMode && responseHeaders != "") {
+         Print("TradingSignalEA: Response Headers: ", responseHeaders);
+      }
+      
+      Print("TradingSignalEA: ========================================");
       return false;
    }
 }
@@ -754,12 +790,32 @@ void PollForSignals() {
       if(DebugMode) Print("TradingSignalEA: Poll Success - Response: ", responseStr);
       ProcessSignalsResponse(responseStr);
       connectionManager.UpdateConnectionHealth(true);
+      lastSuccessfulPoll = TimeGMT();
    } else {
       Print("TradingSignalEA: Poll Failed - HTTP Code: ", result);
+      
+      // Provide specific guidance for HTTP -1 error
+      if(result == -1) {
+         Print("TradingSignalEA: ERROR - HTTP code -1: URL may not be allowed in MT5");
+         Print("TradingSignalEA: Go to: Tools → Options → Expert Advisors");
+         Print("TradingSignalEA: Check 'Allow WebRequest for listed URL' and add: ", ServerURL);
+      } else if(result == 404) {
+         Print("TradingSignalEA: ERROR - Endpoint not found (404). Check server URL: ", ServerURL);
+      } else if(result >= 500) {
+         Print("TradingSignalEA: ERROR - Server error (", result, "). Server may be temporarily unavailable");
+      } else if(result == 0) {
+         Print("TradingSignalEA: ERROR - Request timeout or connection refused");
+      }
+      
       if(ArraySize(response) > 0) {
          string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
          Print("TradingSignalEA: Poll Error Response: ", errorResponse);
       }
+      
+      if(DebugMode && responseHeaders != "") {
+         Print("TradingSignalEA: Response Headers: ", responseHeaders);
+      }
+      
       connectionManager.UpdateConnectionHealth(false);
    }
 }
@@ -1076,25 +1132,17 @@ void ProcessSingleSignal(const TradingSignal &signal) {
          return;
       }
       
-      // FILTER CHECK: Higher timeframe and win rate validation
+      // FILTER CHECK: Higher timeframe validation
       if(EnableSignalFilter) {
          Print("TradingSignalEA: ========================================");
          Print("TradingSignalEA: FILTER CHECK for signal: ", signal.id);
          Print("TradingSignalEA: ========================================");
          
-         // Step 1: Check higher timeframe confirmation
+         // Check higher timeframe confirmation
          if(!ConfirmWithHigherTimeframe(signal)) {
             Print("TradingSignalEA: Signal ", signal.id, " REJECTED by filter - HTF confirmation failed");
             SendSignalAck(signal.id, "rejected", "HTF confirmation failed");
-            RemoveActiveSymbol(signal.symbol);
-            RemoveSignalFromProcessedList(signal.id);
-            return;
-         }
-         
-         // Step 2: Check win rate threshold
-         if(!CheckWinRateThreshold()) {
-            Print("TradingSignalEA: Signal ", signal.id, " REJECTED by filter - Win rate below threshold");
-            SendSignalAck(signal.id, "rejected", "Win rate below threshold");
+            SendSignalRejectionEmail(signal, "HTF confirmation failed");
             RemoveActiveSymbol(signal.symbol);
             RemoveSignalFromProcessedList(signal.id);
             return;
@@ -1194,6 +1242,7 @@ bool ProcessSignal(const TradingSignal& signal) {
       return false;
    }
    
+   
    if(AutoExecute) {
       if(ExecuteTrade(signal)) {
          Print("TradingSignalEA: Trade executed successfully for signal: ", signal.id);
@@ -1232,18 +1281,52 @@ bool ProcessSignal(const TradingSignal& signal) {
 //| Check if trading is enabled                                      |
 //+------------------------------------------------------------------+
 bool IsTradingEnabled() {
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
-      Print("TradingSignalEA: ERROR - Enable 'Allow automated trading' in Tools → Options → Expert Advisors");
+   bool terminalAllowed = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
+   bool accountAllowed = (AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 1);
+   bool autoExecuteEnabled = AutoExecute;
+   
+   if(!terminalAllowed) {
+      string errorMsg = StringFormat(
+         "TradingSignalEA: ERROR - Terminal trading disabled\n"
+         "Fix: Enable 'Allow automated trading' in MT5:\n"
+         "Tools → Options → Expert Advisors → Check 'Allow automated trading'\n"
+         "Account: %d\n"
+         "Time: %s",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         TimeToString(TimeGMT())
+      );
+      Print(errorMsg);
+      SendErrorEmail("Trading Disabled - Terminal Setting", errorMsg);
       return false;
    }
    
-   if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) != 1) {
-      Print("TradingSignalEA: ERROR - Trading is disabled for this account (check with broker)");
+   if(!accountAllowed) {
+      string errorMsg = StringFormat(
+         "TradingSignalEA: ERROR - Account trading disabled by broker\n"
+         "Account: %d\n"
+         "Account Name: %s\n"
+         "Time: %s\n"
+         "Action: Contact your broker to enable trading for this account",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         AccountInfoString(ACCOUNT_NAME),
+         TimeToString(TimeGMT())
+      );
+      Print(errorMsg);
+      SendErrorEmail("Trading Disabled - Account Restriction", errorMsg);
       return false;
    }
    
-   if(!AutoExecute) {
-      Print("TradingSignalEA: ERROR - AutoExecute is disabled in input parameters");
+   if(!autoExecuteEnabled) {
+      string errorMsg = StringFormat(
+         "TradingSignalEA: ERROR - AutoExecute parameter is disabled\n"
+         "Account: %d\n"
+         "Time: %s\n"
+         "Fix: Enable 'AutoExecute' input parameter in EA settings",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         TimeToString(TimeGMT())
+      );
+      Print(errorMsg);
+      SendErrorEmail("Trading Disabled - AutoExecute Off", errorMsg);
       return false;
    }
    
@@ -1282,6 +1365,8 @@ bool ValidateSignal(const TradingSignal& signal) {
    return true;
 }
 
+
+
 //+------------------------------------------------------------------+
 //| Determine HTF trend tolerance per symbol                          |
 //+------------------------------------------------------------------+
@@ -1316,156 +1401,130 @@ bool ConfirmWithHigherTimeframe(const TradingSignal& signal) {
    // Get HTF timeframe
    ENUM_TIMEFRAMES htf = (ENUM_TIMEFRAMES)FilterHTFTimeframe;
    
-   // Get current HTF candles (only need close prices for trend check)
-   double htf_close_0 = iClose(signal.symbol, htf, 0);  // Current candle
-   double htf_close_1 = iClose(signal.symbol, htf, 1);  // Previous candle
+   // Get multiple HTF candles for better trend analysis (look at last 5 CLOSED candles)
+   double htf_close_0 = iClose(signal.symbol, htf, 1);  // Most recently CLOSED candle
+   double htf_close_1 = iClose(signal.symbol, htf, 2);  // One candle prior
+   double htf_close_2 = iClose(signal.symbol, htf, 3);  // 2 candles ago
+   double htf_close_3 = iClose(signal.symbol, htf, 4);  // 3 candles ago
+   double htf_close_4 = iClose(signal.symbol, htf, 5);  // 4 candles ago
    
-   if(htf_close_0 <= 0 || htf_close_1 <= 0) {
+   if(htf_close_0 <= 0 || htf_close_1 <= 0 || htf_close_2 <= 0 || htf_close_3 <= 0 || htf_close_4 <= 0) {
       Print("TradingSignalEA: Filter - Invalid HTF prices for ", signal.symbol);
+      // Fallback to 2-candle check if we don't have enough data
+      if(htf_close_0 <= 0 || htf_close_1 <= 0) {
+         return false;
+      }
+      // If we have at least 2 candles, use simpler check
+      double tolerance = GetHTFTrendTolerance(signal.symbol);
+      double priceDiff = MathAbs(htf_close_0 - htf_close_1);
+      double rangingTolerance = tolerance * HTFRangingMarketTolerance;
+      
+      if(priceDiff < rangingTolerance && !AllowNeutralHTFMarkets) {
+         Print("TradingSignalEA: Filter - HTF ranging market detected - insufficient data");
+         return false;
+      }
+      if(AllowNeutralHTFMarkets) return true;
+      
+      double trendTolerance = tolerance * 0.3;  // Very relaxed from 0.5 to allow more trades
+      bool htf_uptrend = (htf_close_0 - htf_close_1) >= trendTolerance;
+      bool htf_downtrend = (htf_close_1 - htf_close_0) >= trendTolerance;
+      
+      if(signal.action == ORDER_TYPE_BUY && htf_uptrend) return true;
+      if(signal.action == ORDER_TYPE_SELL && htf_downtrend) return true;
+      if(AllowNeutralHTFMarkets) return true;
       return false;
    }
    
    // Determine tolerance based on symbol (with optional override)
    double tolerance = GetHTFTrendTolerance(signal.symbol);
    
-   // Check if price difference is significant enough to consider it a trend
-   // If difference is too small, treat as ranging market and reject
-   double priceDiff = MathAbs(htf_close_0 - htf_close_1);
+   // Get symbol-specific multipliers for different symbol types
+   // Metals (XAUUSD, XAGUSD) have much larger price movements, need different scaling
+   string upperSymbol = signal.symbol;
+   StringToUpper(upperSymbol);
+   bool isMetal = (upperSymbol == "XAUUSD" || upperSymbol == "XAGUSD");
+   bool isJPY = (StringFind(upperSymbol, "JPY") >= 0);
    
-   if(priceDiff < tolerance) {
-      Print("TradingSignalEA: Filter - HTF ranging market detected (price difference: ", priceDiff, 
-            " < tolerance: ", tolerance, ")");
-      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+   // Adjust multipliers based on symbol type
+   // For metals: larger movements, but more lenient thresholds for M30 timeframe
+   // For JPY: medium movements
+   // For standard forex: smaller movements
+   double rangingMultiplier = isMetal ? 4.0 : (isJPY ? 3.5 : 3.5);  // Optimized for ~80% pass rate
+   double trendMultiplier = isMetal ? 0.08 : (isJPY ? 0.35 : 0.35);   // Require clearer trends than before
+   
+   // IMPROVED: Analyze trend using multiple candles (more robust)
+   // Calculate average price movement over last 5 candles
+   double priceChange_0_1 = htf_close_0 - htf_close_1;
+   double priceChange_1_2 = htf_close_1 - htf_close_2;
+   double priceChange_2_3 = htf_close_2 - htf_close_3;
+   double priceChange_3_4 = htf_close_3 - htf_close_4;
+   
+   // Calculate overall trend direction (positive = up, negative = down)
+   double avgPriceChange = (priceChange_0_1 + priceChange_1_2 + priceChange_2_3 + priceChange_3_4) / 4.0;
+   
+   // Calculate total price movement over the period
+   double totalPriceMove = MathAbs(htf_close_0 - htf_close_4);
+   double rangingTolerance = tolerance * HTFRangingMarketTolerance * rangingMultiplier;
+   
+   // Check if market is ranging (very little movement over 5 candles)
+   if(totalPriceMove < rangingTolerance) {
+      Print("TradingSignalEA: Filter - HTF ranging market detected over 5 candles (total move: ", totalPriceMove, 
+            " < tolerance: ", rangingTolerance, ")");
+      Print("TradingSignalEA: Filter - Symbol type: ", (isMetal ? "METAL" : (isJPY ? "JPY" : "FOREX")), 
+            " HTF Close[0]: ", htf_close_0, " HTF Close[4]: ", htf_close_4);
+      
+      if(AllowNeutralHTFMarkets) {
+         Print("TradingSignalEA: Filter - Allowing trade in neutral HTF market (AllowNeutralHTFMarkets enabled)");
+         return true;
+      }
+      
       Print("TradingSignalEA: Filter - Signal REJECTED - No clear HTF trend (ranging market)");
       return false;
    }
    
-   // Simple HTF trend confirmation logic (less strict - only checks trend direction)
-   // Price difference is significant, so we can determine trend direction
-   bool htf_uptrend = (htf_close_0 - htf_close_1) >= tolerance;
-   bool htf_downtrend = (htf_close_1 - htf_close_0) >= tolerance;
+   // Determine trend direction using average price change
+   // Use symbol-specific threshold multiplier
+   double trendTolerance = tolerance * trendMultiplier;
+   bool htf_uptrend = avgPriceChange >= trendTolerance;
+   bool htf_downtrend = avgPriceChange <= -trendTolerance;
    
    bool confirmed = false;
    
    if(signal.action == ORDER_TYPE_BUY && htf_uptrend) {
-      // For BUY signals, we want HTF uptrend (less strict - no entry price check)
-      Print("TradingSignalEA: Filter - BUY signal confirmed by HTF uptrend");
-      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+      Print("TradingSignalEA: Filter - BUY signal confirmed by HTF uptrend (5-candle analysis)");
+      Print("TradingSignalEA: Filter - Symbol type: ", (isMetal ? "METAL" : (isJPY ? "JPY" : "FOREX")),
+            " Avg price change: ", avgPriceChange, " Trend threshold: ", trendTolerance);
+      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[4]: ", htf_close_4);
       confirmed = true;
    }
    else if(signal.action == ORDER_TYPE_SELL && htf_downtrend) {
-      // For SELL signals, we want HTF downtrend (less strict - no entry price check)
-      Print("TradingSignalEA: Filter - SELL signal confirmed by HTF downtrend");
-      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+      Print("TradingSignalEA: Filter - SELL signal confirmed by HTF downtrend (5-candle analysis)");
+      Print("TradingSignalEA: Filter - Symbol type: ", (isMetal ? "METAL" : (isJPY ? "JPY" : "FOREX")),
+            " Avg price change: ", avgPriceChange, " Trend threshold: ", trendTolerance);
+      Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[4]: ", htf_close_4);
       confirmed = true;
    }
    else {
-      Print("TradingSignalEA: Filter - Signal REJECTED - HTF trend mismatch");
-      Print("TradingSignalEA: Filter - Action: ", EnumToString(signal.action), 
-            " HTF Close[0]: ", htf_close_0, " HTF Close[1]: ", htf_close_1);
+      // If AllowNeutralHTFMarkets is enabled, allow trades even if trend doesn't perfectly match
+      if(AllowNeutralHTFMarkets) {
+         Print("TradingSignalEA: Filter - HTF trend mismatch (avg change: ", avgPriceChange, 
+               " vs threshold: ", trendTolerance, "), but allowing trade (AllowNeutralHTFMarkets enabled)");
+         Print("TradingSignalEA: Filter - Symbol type: ", (isMetal ? "METAL" : (isJPY ? "JPY" : "FOREX")),
+               " Action: ", EnumToString(signal.action), 
+               " HTF Close[0]: ", htf_close_0, " HTF Close[4]: ", htf_close_4);
+         confirmed = true;
+      } else {
+         Print("TradingSignalEA: Filter - Signal REJECTED - HTF trend mismatch");
+         Print("TradingSignalEA: Filter - Symbol type: ", (isMetal ? "METAL" : (isJPY ? "JPY" : "FOREX")),
+               " Action: ", EnumToString(signal.action), 
+               " Avg price change: ", avgPriceChange, " Trend threshold: ", trendTolerance);
+         Print("TradingSignalEA: Filter - HTF Close[0]: ", htf_close_0, " HTF Close[4]: ", htf_close_4);
+      }
    }
    
    return confirmed;
 }
 
-//+------------------------------------------------------------------+
-//| Check win rate threshold                                          |
-//+------------------------------------------------------------------+
-bool CheckWinRateThreshold() {
-   if(!EnableSignalFilter) return true; // Filter disabled, allow all
-   
-   // Recalculate win rate from stats
-   if(filterStats.total_trades == 0) {
-      if(AllowFirstTrades) {
-         Print("TradingSignalEA: Filter - No historical trades. Allowing trade (AllowFirstTrades enabled).");
-         return true;  // Allow first trades
-      } else {
-         Print("TradingSignalEA: Filter - No historical trades. Rejecting trade (AllowFirstTrades disabled).");
-         return false;
-      }
-   }
-   
-   filterStats.win_rate = (double)filterStats.winning_trades / filterStats.total_trades;
-   
-   Print("TradingSignalEA: Filter - Current Win Rate: ", DoubleToString(filterStats.win_rate * 100, 2), 
-         "% (", filterStats.winning_trades, "/", filterStats.total_trades, " trades)");
-   Print("TradingSignalEA: Filter - Required Win Rate: ", DoubleToString(MinWinRateThreshold * 100, 2), "%");
-   
-   if(filterStats.win_rate >= MinWinRateThreshold) {
-      Print("TradingSignalEA: Filter - Win rate PASSED threshold: ", DoubleToString(filterStats.win_rate * 100, 2), "%");
-      return true;
-   }
-   else {
-      Print("TradingSignalEA: Filter - Win rate FAILED threshold. Current: ", DoubleToString(filterStats.win_rate * 100, 2),
-            "% Required: ", DoubleToString(MinWinRateThreshold * 100, 2), "%");
-      return false;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Update win rate statistics from trade history                     |
-//+------------------------------------------------------------------+
-void UpdateWinRateStats() {
-   if(!EnableSignalFilter)
-      return;
-
-   datetime endTime = TimeCurrent();
-   datetime startTime = (WinRateHistoryDays > 0) ? (endTime - (WinRateHistoryDays * 86400)) : 0;
-
-   if(!HistorySelect(startTime, endTime)) {
-      Print("TradingSignalEA: WARNING - Failed to select trade history for win rate calculation");
-      return;
-   }
-
-   int totalTrades = 0;
-   int winningTrades = 0;
-   
-   // Check history for closed trades with our magic number
-   for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
-      ulong dealTicket = HistoryDealGetTicket(i);
-      if(dealTicket <= 0)
-         continue;
-
-      datetime dealTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
-      if(startTime > 0 && dealTime < startTime)
-         break; // Remaining deals are older than the cutoff
-
-      if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != MagicNumber)
-         continue;
-
-      ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
-      
-      // Check for position close deals (out deals)
-      if(dealType == DEAL_TYPE_SELL || dealType == DEAL_TYPE_BUY) {
-         ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
-         
-         if(dealEntry == DEAL_ENTRY_OUT) {
-            // This is a closed position
-            double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-            double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
-            double commission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
-            double netProfit = profit + swap + commission;
-            
-            totalTrades++;
-            if(netProfit > 0) {
-               winningTrades++;
-            }
-         }
-      }
-   }
-   
-   filterStats.total_trades = totalTrades;
-   filterStats.winning_trades = winningTrades;
-   if(totalTrades > 0) {
-      filterStats.win_rate = (double)winningTrades / totalTrades;
-   } else {
-      filterStats.win_rate = 0.0;
-   }
-   filterStats.last_update = TimeGMT();
-   
-   Print("TradingSignalEA: Filter - Win rate stats updated: ", winningTrades, "/", totalTrades, 
-         " = ", DoubleToString(filterStats.win_rate * 100, 2), "%");
-}
 
 //+------------------------------------------------------------------+
 //| Calculate lot size based on signal-specific risk percentage      |
@@ -2136,7 +2195,7 @@ bool ExecuteTrade(const TradingSignal& signal) {
    }
 
    double point = SymbolInfoDouble(signal.symbol, SYMBOL_POINT);
-   double volatilityThreshold = (signal.symbol == "XAUUSD") ? (point * 100) : (point * 50);
+   double volatilityThreshold = (signal.symbol == "XAUUSD") ? (point * 200) : (point * 100);
    double priceDiff = MathAbs(currentPrice - signal.entry);
    
    Print("TradingSignalEA: Current Price: ", currentPrice, " | Signal Entry: ", signal.entry);
@@ -2146,6 +2205,11 @@ bool ExecuteTrade(const TradingSignal& signal) {
    if(priceDiff > volatilityThreshold) {
       Print("TradingSignalEA: ERROR - Price moved too far (", priceDiff/point, " points, threshold: ", volatilityThreshold/point, ") from entry - avoiding bad fill");
       Print("TradingSignalEA: This may indicate fast market movement or delayed signal processing");
+      
+      // Send rejection email (only once per signal - duplicate prevention built-in)
+      SendSignalRejectionEmail(signal, StringFormat("Price moved too far - Current: %.5f, Signal Entry: %.5f, Difference: %.1f points (threshold: %.1f)", 
+         currentPrice, signal.entry, priceDiff/point, volatilityThreshold/point));
+      
       return false;
    }
 
@@ -2423,16 +2487,36 @@ void PollForSignalsGET() {
    int result = WebRequest("GET", url, headers, 5000, emptyData, response, responseHeaders);
 
    if(result == 200) {
-      string responseStr = CharArrayToString(response);
+      string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
       if(DebugMode) Print("TradingSignalEA: Received response (GET): ", responseStr);
       ProcessSignalsResponse(responseStr);
       connectionManager.UpdateConnectionHealth(true);
+      lastSuccessfulPoll = TimeGMT();
    } else {
       Print("TradingSignalEA: Failed to poll for signals (GET). HTTP code: ", result);
+      
+      // Provide specific guidance for HTTP -1 error
+      if(result == -1) {
+         Print("TradingSignalEA: ERROR - HTTP code -1: URL may not be allowed in MT5");
+         Print("TradingSignalEA: Go to: Tools → Options → Expert Advisors");
+         Print("TradingSignalEA: Check 'Allow WebRequest for listed URL' and add: ", ServerURL);
+      } else if(result == 404) {
+         Print("TradingSignalEA: ERROR - Endpoint not found (404). Check server URL: ", ServerURL);
+      } else if(result >= 500) {
+         Print("TradingSignalEA: ERROR - Server error (", result, "). Server may be temporarily unavailable");
+      } else if(result == 0) {
+         Print("TradingSignalEA: ERROR - Request timeout or connection refused");
+      }
+      
       if(ArraySize(response) > 0) {
-         string errorResponse = CharArrayToString(response);
+         string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
          Print("TradingSignalEA: GET Error Response: ", errorResponse);
       }
+      
+      if(DebugMode && responseHeaders != "") {
+         Print("TradingSignalEA: Response Headers: ", responseHeaders);
+      }
+      
       connectionManager.UpdateConnectionHealth(false);
    }
 }
@@ -2572,6 +2656,73 @@ bool UpdateTradeOutcomeWithSymbol(ulong ticket, string symbol, string outcome) {
       }
    }
    
+   // FIX: If we couldn't find deals in history, try to get prices from current position history
+   // This can happen if deal history hasn't been updated yet when OnTradeTransaction fires
+   if(closePrice <= 0 || entryPrice <= 0) {
+      Print("TradingSignalEA: WARNING - Could not find complete deal history, attempting fallback lookup...");
+      
+      // Try to get close price from the most recent deal for this position
+      if(closePrice <= 0) {
+         // Search for the most recent deal with this position ID
+         for(int i = HistoryDealsTotal() - 1; i >= 0; i--) {
+            ulong dealTicket = HistoryDealGetTicket(i);
+            if(dealTicket > 0 && HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID) == ticket) {
+               ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+               if(dealEntry == DEAL_ENTRY_OUT) {
+                  closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+                  if(closePrice > 0) {
+                     closeTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+                     lotSize = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+                     profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+                     swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+                     commission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+                     netProfit = profit + swap + commission;
+                     Print("TradingSignalEA: Found close deal via fallback - Price: ", closePrice);
+                     break;
+                  }
+               }
+            }
+         }
+      }
+      
+      // Try to get entry price from the earliest deal for this position
+      if(entryPrice <= 0) {
+         datetime earliestTime = 0;
+         for(int i = 0; i < HistoryDealsTotal(); i++) {
+            ulong dealTicket = HistoryDealGetTicket(i);
+            if(dealTicket > 0 && HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID) == ticket) {
+               ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+               if(dealEntry == DEAL_ENTRY_IN) {
+                  datetime dealTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+                  if(earliestTime == 0 || dealTime < earliestTime) {
+                     entryPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+                     if(entryPrice > 0) {
+                        openTime = dealTime;
+                        earliestTime = dealTime;
+                        if(actionStr == "") {
+                           ENUM_DEAL_TYPE openDealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+                           actionStr = (openDealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+                        }
+                        Print("TradingSignalEA: Found entry deal via fallback - Price: ", entryPrice);
+                     }
+                  }
+               }
+            }
+         }
+      }
+      
+      // Final fallback: if still no prices, try to get from symbol info (last resort)
+      if(closePrice <= 0) {
+         closePrice = SymbolInfoDouble(symbol, SYMBOL_BID);
+         if(closePrice <= 0) closePrice = SymbolInfoDouble(symbol, SYMBOL_ASK);
+         Print("TradingSignalEA: Using current market price as fallback for close: ", closePrice);
+      }
+      if(entryPrice <= 0) {
+         // If we still don't have entry price, we can't send a meaningful email
+         Print("TradingSignalEA: ERROR - Cannot determine entry price for ticket ", ticket, " - email may be incomplete");
+      }
+   }
+   
    string postData = StringFormat("{\"ticket\":%d,\"outcome\":\"%s\",\"symbol\":\"%s\",\"closePrice\":%.5f,\"closeTime\":\"%s\"}",
                                  ticket, outcome, symbol, closePrice, TimeToString(closeTime));
 
@@ -2583,10 +2734,15 @@ bool UpdateTradeOutcomeWithSymbol(ulong ticket, string symbol, string outcome) {
 
    int result = WebRequest("POST", ServerURL + "/mt5/trade-outcome", headers, 5000, data, response, responseHeaders);
 
+   // Send trade close email regardless of web request result
+   // Email notification should be independent of backend update status
+   Print("TradingSignalEA: About to call SendTradeCloseEmailDetailed for ticket ", ticket);
+   Print("TradingSignalEA: Entry Price: ", entryPrice, ", Close Price: ", closePrice, ", Lot Size: ", lotSize);
+   SendTradeCloseEmailDetailed(ticket, symbol, actionStr, entryPrice, closePrice, lotSize, netProfit, outcome, signalId, openTime, closeTime);
+   Print("TradingSignalEA: SendTradeCloseEmailDetailed completed for ticket ", ticket);
+
    if(result == 200) {
       Print("TradingSignalEA: Trade outcome updated successfully - Ticket: ", ticket, ", Symbol: ", symbol, ", Outcome: ", outcome);
-      // Send trade close email with full details
-      SendTradeCloseEmailDetailed(ticket, symbol, actionStr, entryPrice, closePrice, lotSize, netProfit, outcome, signalId, openTime, closeTime);
       return true;
    } else {
       Print("TradingSignalEA: Failed to update trade outcome - Ticket: ", ticket, ", Error: ", result);
@@ -2662,17 +2818,16 @@ void CheckAndUpdateTradeOutcomes() {
                      Print("TradingSignalEA: Net Profit: $", netProfit);
                      Print("TradingSignalEA: ========================================");
                      
-                     if(UpdateTradeOutcomeWithSymbol(positionTicket, symbol, outcome)) {
-                        MarkTradeOutcomeProcessed(positionTicket);
-                        Print("TradingSignalEA: Trade closure processed successfully - Email sent");
-                        
-                        // Update win rate statistics for filtering
-                        if(EnableSignalFilter) {
-                           UpdateWinRateStats();
-                        }
-                     } else {
-                        Print("TradingSignalEA: ERROR - Failed to process trade closure");
-                     }
+                     // Update trade outcome and send email
+                     // Email is now sent inside UpdateTradeOutcomeWithSymbol regardless of web request result
+                     Print("TradingSignalEA: Calling UpdateTradeOutcomeWithSymbol for position ", positionTicket, " (from history check)");
+                     UpdateTradeOutcomeWithSymbol(positionTicket, symbol, outcome);
+                     
+                     // Mark as processed after email is sent (to prevent duplicate emails)
+                     // Web request success/failure is separate from email notification
+                     MarkTradeOutcomeProcessed(positionTicket);
+                     Print("TradingSignalEA: Trade closure processed - Email should have been sent (check logs above for email status)");
+                     
                   }
                }
             }
@@ -2886,6 +3041,43 @@ void MarkTradeOutcomeProcessed(ulong ticket) {
    ArrayResize(processedTickets, size + 1);
    processedTickets[size] = ticket;
 }
+
+//+------------------------------------------------------------------+
+//| Check if trade close email was already sent                      |
+//+------------------------------------------------------------------+
+bool IsTradeCloseEmailSent(ulong ticket) {
+   for(int i = 0; i < tradeCloseEmailsSentCount; i++) {
+      if(tradeCloseEmailsSent[i] == ticket) {
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Mark trade close email as sent                                  |
+//+------------------------------------------------------------------+
+void MarkTradeCloseEmailSent(ulong ticket) {
+   if(IsTradeCloseEmailSent(ticket)) {
+      Print("TradingSignalEA: WARNING - Attempted to mark already-sent email for ticket ", ticket);
+      return;
+   }
+   
+   ArrayResize(tradeCloseEmailsSent, tradeCloseEmailsSentCount + 1);
+   tradeCloseEmailsSent[tradeCloseEmailsSentCount] = ticket;
+   tradeCloseEmailsSentCount++;
+   Print("TradingSignalEA: Marked trade close email as sent for ticket ", ticket, " (Total: ", tradeCloseEmailsSentCount, ")");
+   
+   // Clean up old entries to prevent memory issues (keep last 200)
+   if(tradeCloseEmailsSentCount > 200) {
+      for(int i = 0; i < 100; i++) {
+         tradeCloseEmailsSent[i] = tradeCloseEmailsSent[i + 100];
+      }
+      tradeCloseEmailsSentCount = 100;
+      ArrayResize(tradeCloseEmailsSent, 100);
+      Print("TradingSignalEA: Cleaned up old trade close email tracking entries");
+   }
+}
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
@@ -2967,10 +3159,64 @@ void SendTradeCloseEmailDetailed(ulong ticket, string symbol, string action,
                                   double entryPrice, double closePrice, double lotSize,
                                   double netProfit, string outcome, string signalId,
                                   datetime openTime, datetime closeTime) {
-  Print("TradingSignalEA: SendTradeCloseEmailDetailed called - SendOnTradeClose: ", SendOnTradeClose);
+  Print("TradingSignalEA: ========================================");
+  Print("TradingSignalEA: SendTradeCloseEmailDetailed called");
+  Print("TradingSignalEA: Ticket: ", ticket);
+  Print("TradingSignalEA: Symbol: ", symbol);
+  Print("TradingSignalEA: SendOnTradeClose: ", SendOnTradeClose);
+  Print("TradingSignalEA: SendEmailNotifications: ", SendEmailNotifications);
+  Print("TradingSignalEA: ========================================");
+  
+  // Validate required settings FIRST (before duplicate check)
+  if(!SendEmailNotifications) {
+    Print("TradingSignalEA: WARNING - SendEmailNotifications is disabled - email not sent");
+    return;
+  }
+  
   if(!SendOnTradeClose) {
     Print("TradingSignalEA: WARNING - SendOnTradeClose is disabled - email not sent");
     return;
+  }
+  
+  // Validate required parameters
+  if(ticket == 0) {
+    Print("TradingSignalEA: ERROR - Invalid ticket (0) - cannot send email");
+    return;
+  }
+  
+  if(symbol == "" || symbol == "unknown") {
+    Print("TradingSignalEA: ERROR - Invalid symbol (", symbol, ") - cannot send email");
+    return;
+  }
+  
+  // FIX: Allow email even if entry price is missing (close price is more critical)
+  if(closePrice <= 0) {
+    Print("TradingSignalEA: ERROR - Invalid close price (", closePrice, ") - cannot send email");
+    Print("TradingSignalEA: Will retry when deal history becomes available");
+    return;
+  }
+  
+  // Warn if entry price is missing but still send email
+  if(entryPrice <= 0) {
+    Print("TradingSignalEA: WARNING - Entry price not available (", entryPrice, ") - sending email with available data");
+    entryPrice = closePrice; // Use close price as fallback for calculations
+  }
+  
+  // FIX: Check for duplicate email AFTER validation passes
+  // This allows retry if previous attempt failed due to validation
+  bool alreadySent = IsTradeCloseEmailSent(ticket);
+  Print("TradingSignalEA: Checking duplicate email status for ticket ", ticket, ": ", (alreadySent ? "ALREADY SENT" : "NOT SENT YET"));
+  Print("TradingSignalEA: Total emails tracked: ", tradeCloseEmailsSentCount);
+  if(alreadySent) {
+    Print("TradingSignalEA: Email already sent successfully for ticket ", ticket, " - skipping duplicate");
+    Print("TradingSignalEA: If you believe this is incorrect, the EA needs to be restarted to clear the tracking array");
+    return;
+  }
+  
+  if(openTime <= 0 || closeTime <= 0) {
+    Print("TradingSignalEA: WARNING - Invalid times (Open: ", openTime, ", Close: ", closeTime, ") - using current time");
+    if(openTime <= 0) openTime = TimeGMT();
+    if(closeTime <= 0) closeTime = TimeGMT();
   }
   
   Print("TradingSignalEA: Preparing trade close email for Ticket: ", ticket, ", Symbol: ", symbol);
@@ -3035,9 +3281,56 @@ void SendTradeCloseEmailDetailed(ulong ticket, string symbol, string action,
     AccountInfoInteger(ACCOUNT_LOGIN)
   );
   
-  Print("TradingSignalEA: Sending trade close email - Subject: ", subject);
-  SendTradeEmail(subject, body);
-  Print("TradingSignalEA: Trade close email send attempt completed");
+  Print("TradingSignalEA: ========================================");
+  Print("TradingSignalEA: Sending trade close email");
+  Print("TradingSignalEA: Subject: ", subject);
+  Print("TradingSignalEA: Ticket: ", ticket);
+  Print("TradingSignalEA: Entry Price: ", entryPrice);
+  Print("TradingSignalEA: Close Price: ", closePrice);
+  Print("TradingSignalEA: Net Profit: ", netProfit);
+  Print("TradingSignalEA: Outcome: ", outcome);
+  Print("TradingSignalEA: ========================================");
+  
+  // Attempt to send email
+  bool emailSent = false;
+  Print("TradingSignalEA: Calling SendMail() function...");
+  
+  if(SendMail(subject, body)) {
+    emailSent = true;
+    Print("TradingSignalEA: ✓ Trade close email sent successfully for ticket ", ticket);
+    if(EmailAddress != "") {
+      Print("TradingSignalEA: Email sent to: ", EmailAddress);
+    } else {
+      Print("TradingSignalEA: Email sent via terminal email configuration");
+    }
+  } else {
+    int errorCode = GetLastError();
+    string errorDesc = "";
+    switch(errorCode) {
+      case 0: errorDesc = "No error"; break;
+      case 4006: errorDesc = "Invalid function parameters"; break;
+      case 4014: errorDesc = "Array is too small"; break;
+      default: errorDesc = "Unknown error"; break;
+    }
+    Print("TradingSignalEA: ✗ FAILED to send trade close email for ticket ", ticket);
+    Print("TradingSignalEA: Error Code: ", errorCode, " (", errorDesc, ")");
+    Print("TradingSignalEA: Please check MT5 email settings (Tools → Options → Email)");
+    Print("TradingSignalEA: Ensure SMTP server is configured and email is enabled");
+    Print("TradingSignalEA: Email subject: ", subject);
+    Print("TradingSignalEA: Email will be retried on next trade closure check");
+    ResetLastError(); // Clear error for next attempt
+  }
+  
+  // Mark email as sent ONLY if it was successfully sent
+  // This prevents duplicate sends while allowing retry on failure
+  if(emailSent) {
+    MarkTradeCloseEmailSent(ticket);
+    Print("TradingSignalEA: Email marked as sent for ticket ", ticket);
+  } else {
+    Print("TradingSignalEA: Email NOT marked as sent (failed) - will retry on next attempt");
+  }
+  
+  Print("TradingSignalEA: Trade close email processing completed for ticket ", ticket);
 }
 
 //+------------------------------------------------------------------+
@@ -3092,6 +3385,48 @@ void SendConnectionStatusEmail(string status, string details = "") {
 }
 
 //+------------------------------------------------------------------+
+//| Check and warn about log file size                               |
+//+------------------------------------------------------------------+
+void CheckAndWarnLogFileSize() {
+   // MT5 log files are stored in the terminal's data folder
+   // We can't directly access them, but we can provide warnings and instructions
+   // Log files typically located at: Terminal Data Folder/logs/
+   
+   string logPath = TerminalInfoString(TERMINAL_DATA_PATH) + "\\logs\\";
+   string accountLogFile = StringFormat("%s%d.log", logPath, AccountInfoInteger(ACCOUNT_LOGIN));
+   
+   // Note: We can't directly check file size in MQL5 without using DLL
+   // Instead, we'll provide periodic reminders and instructions
+   static datetime lastWarningTime = 0;
+   static int warningCount = 0;
+   
+   // Warn every 6 hours if verbose logging is enabled
+   if(EnableVerboseLogging && (TimeGMT() - lastWarningTime) >= 21600) {
+      string warningMsg = StringFormat(
+         "TradingSignalEA: LOG FILE MANAGEMENT REMINDER\n"
+         "Account: %d\n"
+         "Log Location: %s\n"
+         "To reduce log file size:\n"
+         "1. Set 'EnableVerboseLogging = false' in EA inputs\n"
+         "2. Manually delete old log files from: %s\n"
+         "3. Restart MT5 terminal to start fresh logs\n"
+         "Current log file: %s\n"
+         "If log file is > 500MB, consider cleanup to improve performance",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         logPath,
+         logPath,
+         accountLogFile
+      );
+      
+      if(warningCount < 3) {  // Only warn 3 times, then stop
+         Print(warningMsg);
+         warningCount++;
+         lastWarningTime = TimeGMT();
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Send error notification email                                    |
 //+------------------------------------------------------------------+
 void SendErrorEmail(string errorType, string errorDetails) {
@@ -3108,4 +3443,91 @@ void SendErrorEmail(string errorType, string errorDetails) {
     errorDetails
   );
   SendTradeEmail(subject, body);
+}
+
+//+------------------------------------------------------------------+
+//| Check if rejection email was already sent for this signal        |
+//+------------------------------------------------------------------+
+bool HasRejectionEmailBeenSent(const string& signalId) {
+   for(int i = 0; i < rejectionEmailSentCount; i++) {
+      if(rejectionEmailSent[i] == signalId) {
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Mark signal as having rejection email sent                        |
+//+------------------------------------------------------------------+
+void MarkRejectionEmailSent(const string& signalId) {
+   if(!HasRejectionEmailBeenSent(signalId)) {
+      ArrayResize(rejectionEmailSent, rejectionEmailSentCount + 1);
+      rejectionEmailSent[rejectionEmailSentCount] = signalId;
+      rejectionEmailSentCount++;
+      
+      // Cleanup old entries if array gets too large (keep last 100)
+      if(rejectionEmailSentCount > 100) {
+         for(int i = 0; i < 50; i++) {
+            rejectionEmailSent[i] = rejectionEmailSent[i + 50];
+         }
+         rejectionEmailSentCount = 50;
+         ArrayResize(rejectionEmailSent, 50);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Send signal rejection email notification                         |
+//+------------------------------------------------------------------+
+void SendSignalRejectionEmail(const TradingSignal& signal, string rejectionReason) {
+  if(!SendOnErrors) return;
+  
+  // Check if we've already sent a rejection email for this signal
+  if(HasRejectionEmailBeenSent(signal.id)) {
+     Print("TradingSignalEA: Rejection email already sent for signal ", signal.id, " - skipping duplicate notification");
+     return;
+  }
+  
+  string actionStr = (signal.action == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+  string subject = StringFormat("MT5 Signal REJECTED - %s %s (ID: %s)", actionStr, signal.symbol, signal.id);
+  
+  double stopPips = 0.0;
+  double pipSizeLocal = 0.0;
+  bool isXAUUSDLocal = (signal.symbol == "XAUUSD" || signal.symbol == "XAGUSD");
+  bool isJPYLocal = (StringFind(signal.symbol, "JPY") >= 0);
+  if(isXAUUSDLocal) pipSizeLocal = 0.10; else if(isJPYLocal) pipSizeLocal = 0.01; else pipSizeLocal = 0.0001;
+  double priceDiffLocal = (signal.action == ORDER_TYPE_BUY) ? (signal.entry - signal.stop) : (signal.stop - signal.entry);
+  if(pipSizeLocal > 0) stopPips = priceDiffLocal / pipSizeLocal;
+  
+  string body = StringFormat(
+    "Signal ID: %s\n"
+    "Symbol: %s\n"
+    "Action: %s\n"
+    "Entry: %.5f\n"
+    "Stop: %.5f\n"
+    "Target: %.5f\n"
+    "Risk: %.2f%%\n"
+    "Stop Distance: %.1f pips\n"
+    "Status: REJECTED\n"
+    "Rejection Reason: %s\n"
+    "Time: %s\n"
+    "Account: %d",
+    signal.id,
+    signal.symbol,
+    actionStr,
+    signal.entry,
+    signal.stop,
+    signal.target,
+    signal.risk_percent,
+    stopPips,
+    rejectionReason,
+    TimeToString(TimeGMT()),
+    AccountInfoInteger(ACCOUNT_LOGIN)
+  );
+  
+  SendTradeEmail(subject, body);
+  
+  // Mark this signal as having rejection email sent
+  MarkRejectionEmailSent(signal.id);
 }

@@ -51,6 +51,10 @@ input bool SendOnSignalAck = false;
 input bool SendOnConnectionStatus = true;
 input bool SendOnErrors = true;
 
+// Log management
+input bool EnableVerboseLogging = true;  // Set to false to reduce log file size
+input int LogCleanupCheckInterval = 3600;  // Check log size every N seconds (default: 1 hour)
+
 //--- Global variables
 datetime lastPollTime = 0;
 datetime lastSuccessfulPoll = 0;
@@ -63,6 +67,7 @@ int hkTimeCheckInterval = 300;
 datetime lastHKTimeCheck = 0;
 datetime lastNetworkIssue = 0;
 double initialAccountBalance = 0;  // Stores the initial deposit/balance for fixed position sizing
+datetime lastLogCleanupCheck = 0;  // Track last log cleanup check time
 
 string processedSignals[];
 int processedSignalsCount = 0;
@@ -501,21 +506,27 @@ void OnTimer() {
       signalProcessingStartTime = 0;
    }
 
+   // Check log file size periodically
+   if(LogCleanupCheckInterval > 0 && (TimeGMT() - lastLogCleanupCheck) >= LogCleanupCheckInterval) {
+      CheckAndWarnLogFileSize();
+      lastLogCleanupCheck = TimeGMT();
+   }
+
    if(TimeGMT() - lastPollTime >= PollInterval/1000) {
       bool shouldPoll = true;
       
       if(currentlyProcessingSignal != "") {
-         Print("TradingSignalEA: Currently processing signal ", currentlyProcessingSignal, " - skipping poll");
+         if(EnableVerboseLogging) Print("TradingSignalEA: Currently processing signal ", currentlyProcessingSignal, " - skipping poll");
          shouldPoll = false;
       }
       
       if(IsSymbolActive(Symbol())) {
-         Print("TradingSignalEA: Current symbol ", Symbol(), " has active trade - skipping poll");
+         if(EnableVerboseLogging) Print("TradingSignalEA: Current symbol ", Symbol(), " has active trade - skipping poll");
          shouldPoll = false;
       }
       
       if(PositionsTotal() >= 5) {
-         Print("TradingSignalEA: Maximum concurrent positions reached - skipping poll");
+         if(EnableVerboseLogging) Print("TradingSignalEA: Maximum concurrent positions reached - skipping poll");
          shouldPoll = false;
       }
       
@@ -1135,18 +1146,52 @@ bool ProcessSignal(const TradingSignal& signal) {
 //| Check if trading is enabled                                      |
 //+------------------------------------------------------------------+
 bool IsTradingEnabled() {
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
-      Print("TradingSignalEA: ERROR - Enable 'Allow automated trading' in Tools → Options → Expert Advisors");
+   bool terminalAllowed = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
+   bool accountAllowed = (AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 1);
+   bool autoExecuteEnabled = AutoExecute;
+   
+   if(!terminalAllowed) {
+      string errorMsg = StringFormat(
+         "TradingSignalEA: ERROR - Terminal trading disabled\n"
+         "Fix: Enable 'Allow automated trading' in MT5:\n"
+         "Tools → Options → Expert Advisors → Check 'Allow automated trading'\n"
+         "Account: %d\n"
+         "Time: %s",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         TimeToString(TimeGMT())
+      );
+      Print(errorMsg);
+      SendErrorEmail("Trading Disabled - Terminal Setting", errorMsg);
       return false;
    }
    
-   if(AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) != 1) {
-      Print("TradingSignalEA: ERROR - Trading is disabled for this account (check with broker)");
+   if(!accountAllowed) {
+      string errorMsg = StringFormat(
+         "TradingSignalEA: ERROR - Account trading disabled by broker\n"
+         "Account: %d\n"
+         "Account Name: %s\n"
+         "Time: %s\n"
+         "Action: Contact your broker to enable trading for this account",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         AccountInfoString(ACCOUNT_NAME),
+         TimeToString(TimeGMT())
+      );
+      Print(errorMsg);
+      SendErrorEmail("Trading Disabled - Account Restriction", errorMsg);
       return false;
    }
    
-   if(!AutoExecute) {
-      Print("TradingSignalEA: ERROR - AutoExecute is disabled in input parameters");
+   if(!autoExecuteEnabled) {
+      string errorMsg = StringFormat(
+         "TradingSignalEA: ERROR - AutoExecute parameter is disabled\n"
+         "Account: %d\n"
+         "Time: %s\n"
+         "Fix: Enable 'AutoExecute' input parameter in EA settings",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         TimeToString(TimeGMT())
+      );
+      Print(errorMsg);
+      SendErrorEmail("Trading Disabled - AutoExecute Off", errorMsg);
       return false;
    }
    
@@ -2300,10 +2345,15 @@ bool UpdateTradeOutcomeWithSymbol(ulong ticket, string symbol, string outcome) {
 
    int result = WebRequest("POST", ServerURL + "/mt5/trade-outcome", headers, 5000, data, response, responseHeaders);
 
+   // Send trade close email regardless of web request result
+   // Email notification should be independent of backend update status
+   Print("TradingSignalEA: About to call SendTradeCloseEmailDetailed for ticket ", ticket);
+   Print("TradingSignalEA: Entry Price: ", entryPrice, ", Close Price: ", closePrice, ", Lot Size: ", lotSize);
+   SendTradeCloseEmailDetailed(ticket, symbol, actionStr, entryPrice, closePrice, lotSize, netProfit, outcome, signalId, openTime, closeTime);
+   Print("TradingSignalEA: SendTradeCloseEmailDetailed completed for ticket ", ticket);
+
    if(result == 200) {
       Print("TradingSignalEA: Trade outcome updated successfully - Ticket: ", ticket, ", Symbol: ", symbol, ", Outcome: ", outcome);
-      // Send trade close email with full details
-      SendTradeCloseEmailDetailed(ticket, symbol, actionStr, entryPrice, closePrice, lotSize, netProfit, outcome, signalId, openTime, closeTime);
       return true;
    } else {
       Print("TradingSignalEA: Failed to update trade outcome - Ticket: ", ticket, ", Error: ", result);
@@ -2798,6 +2848,48 @@ void SendConnectionStatusEmail(string status, string details = "") {
     details
   );
   SendTradeEmail(subject, body);
+}
+
+//+------------------------------------------------------------------+
+//| Check and warn about log file size                               |
+//+------------------------------------------------------------------+
+void CheckAndWarnLogFileSize() {
+   // MT5 log files are stored in the terminal's data folder
+   // We can't directly access them, but we can provide warnings and instructions
+   // Log files typically located at: Terminal Data Folder/logs/
+   
+   string logPath = TerminalInfoString(TERMINAL_DATA_PATH) + "\\logs\\";
+   string accountLogFile = StringFormat("%s%d.log", logPath, AccountInfoInteger(ACCOUNT_LOGIN));
+   
+   // Note: We can't directly check file size in MQL5 without using DLL
+   // Instead, we'll provide periodic reminders and instructions
+   static datetime lastWarningTime = 0;
+   static int warningCount = 0;
+   
+   // Warn every 6 hours if verbose logging is enabled
+   if(EnableVerboseLogging && (TimeGMT() - lastWarningTime) >= 21600) {
+      string warningMsg = StringFormat(
+         "TradingSignalEA: LOG FILE MANAGEMENT REMINDER\n"
+         "Account: %d\n"
+         "Log Location: %s\n"
+         "To reduce log file size:\n"
+         "1. Set 'EnableVerboseLogging = false' in EA inputs\n"
+         "2. Manually delete old log files from: %s\n"
+         "3. Restart MT5 terminal to start fresh logs\n"
+         "Current log file: %s\n"
+         "If log file is > 500MB, consider cleanup to improve performance",
+         AccountInfoInteger(ACCOUNT_LOGIN),
+         logPath,
+         logPath,
+         accountLogFile
+      );
+      
+      if(warningCount < 3) {  // Only warn 3 times, then stop
+         Print(warningMsg);
+         warningCount++;
+         lastWarningTime = TimeGMT();
+      }
+   }
 }
 
 //+------------------------------------------------------------------+

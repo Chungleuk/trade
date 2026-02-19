@@ -14,8 +14,9 @@ export const WebhookDisplay: React.FC<WebhookDisplayProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   
-  // Use Supabase Edge Function URL for webhook
-  const webhookUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook`;
+  // Use Render backend (no Supabase Edge Function)
+  const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://trading-backend-4v0f.onrender.com';
+  const webhookUrl = propWebhookUrl || `${backendUrl}/webhook`;
 
   const copyWebhookUrl = async () => {
     try {

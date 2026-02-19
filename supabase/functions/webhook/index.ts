@@ -537,8 +537,9 @@ Deno.serve(async (req: Request) => {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     // Insert the alert into the database
-    // Determine dynamic risk% based on per-symbol node
-    const groupKey = (parsedAlert.symbol || 'UNKNOWN').toUpperCase();
+    // POSITION_SIZING_MODE: "global" (all pairs share W-L) or "per_pair" (each pair independent)
+    const sizingMode = (Deno.env.get("POSITION_SIZING_MODE") || "global").toLowerCase();
+    const groupKey = sizingMode === "per_pair" ? (parsedAlert.symbol || "UNKNOWN").toUpperCase() : "GLOBAL";
     let riskPercent = '0.65';
     try {
       const { data: state } = await supabase

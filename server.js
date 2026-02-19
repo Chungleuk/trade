@@ -12,6 +12,18 @@ const supabaseUrl = process.env.SUPABASE_URL || 'https://xdjthqpnsyrlulqldlpi.su
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || 'your_service_role_key_here';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// Position sizing mode: "global" (all pairs share W-L) or "per_pair" (each pair independent)
+const POSITION_SIZING_MODE = (process.env.POSITION_SIZING_MODE || 'global').toLowerCase();
+
+// Node-to-risk map (same as Supabase webhook)
+const NODE_RISK_MAP = {
+  'Start': 0.65, '1-0': 0.58, '0-1': 0.73, '2-0': 0.44, '1-1': 0.73, '0-2': 0.73,
+  '3-0': 0.25, '2-1': 0.62, '1-2': 0.83, '0-3': 0.62, '4-0': 0.08, '3-1': 0.41,
+  '2-2': 0.83, '1-3': 0.83, '0-4': 0.41, '4-1': 0.17, '3-2': 0.66, '2-3': 0.99,
+  '1-4': 0.66, '0-5': 0.17, '4-2': 0.33, '3-3': 0.99, '2-4': 0.99, '1-5': 0.33,
+  '4-3': 0.66, '3-4': 1.33, '2-5': 0.66, '4-4': 1.33, '3-5': 1.33, '4-5': 2.65,
+};
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
@@ -19,6 +31,7 @@ app.get('/', (req, res) => {
     endpoints: {
       status: '/status',
       health: '/health',
+      webhook: '/webhook (TradingView - no Edge Function)',
       mt5_connect: '/mt5/connect',
       mt5_heartbeat: '/mt5/heartbeat',
       mt5_disconnect: '/mt5/disconnect',
@@ -38,6 +51,63 @@ app.get('/status', (req, res) => {
     timestamp: new Date().toISOString(),
     version: '1.0.0'
   });
+});
+
+// TradingView webhook - receives alerts, saves to Supabase (no Edge Function)
+app.post('/webhook', async (req, res) => {
+  try {
+    const data = req.body;
+    const action = (data.action || data.side || data.type || '').toString().toUpperCase();
+    const symbol = (data.symbol || data.ticker || data.instrument || data.pair || 'UNKNOWN').toString().toUpperCase();
+    const entry = parseFloat(data.entry || data.price || data.entry_price || data.fill_price || data.close || 0);
+
+    if (!action || !symbol || !entry || isNaN(entry)) {
+      return res.status(400).json({ error: 'Missing action, symbol, or entry' });
+    }
+    const act = action.includes('BUY') || action.includes('LONG') ? 'BUY' : action.includes('SELL') || action.includes('SHORT') ? 'SELL' : null;
+    if (!act) return res.status(400).json({ error: 'Invalid action' });
+
+    const groupKey = POSITION_SIZING_MODE === 'per_pair' ? symbol : 'GLOBAL';
+    let riskPercent = '0.65';
+    try {
+      const { data: state } = await supabase
+        .from('position_sizing_state')
+        .select('*')
+        .eq('group_key', groupKey)
+        .maybeSingle();
+      const node = state?.current_node || 'Start';
+      riskPercent = (NODE_RISK_MAP[node] ?? 0.65).toFixed(2);
+    } catch {}
+
+    const alertId = data.id || `alert_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const { data: inserted, error } = await supabase
+      .from('trading_alerts')
+      .insert({
+        action: act,
+        symbol,
+        timeframe: String(data.timeframe || data.tf || '15'),
+        entry: String(entry),
+        target: data.target || data.tp ? String(parseFloat(data.target || data.tp)) : null,
+        stop: data.stop || data.sl ? String(parseFloat(data.stop || data.sl)) : null,
+        rr: data.rr || data.risk_reward || null,
+        risk: riskPercent,
+        alert_id: alertId,
+        message: JSON.stringify(data),
+        status: 'active',
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Webhook Supabase error:', error);
+      return res.status(500).json({ error: 'Failed to save alert' });
+    }
+    console.log(`Webhook: ${symbol} ${act} saved, risk ${riskPercent}% (${groupKey})`);
+    res.json({ success: true, alert: inserted, risk: riskPercent });
+  } catch (err) {
+    console.error('Webhook error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // MT5 connection endpoint
@@ -148,17 +218,56 @@ app.post('/mt5/disconnect', (req, res) => {
   });
 });
 
-// MT5 trade outcome endpoint
-app.post('/mt5/trade-outcome', (req, res) => {
+// Position sizing: advance node based on outcome (GLOBAL mode - all pairs share one W-L sequence)
+function advanceNode(currentNode, outcome) {
+  if (currentNode === 'Start') {
+    if (outcome === 'win') return '1-0';
+    if (outcome === 'loss') return '0-1';
+    return 'Start';
+  }
+  const match = currentNode.match(/^(\d+)-(\d+)$/);
+  if (!match) return 'Start';
+  const wins = parseInt(match[1], 10);
+  const losses = parseInt(match[2], 10);
+  const newWins = outcome === 'win' ? wins + 1 : wins;
+  const newLosses = outcome === 'loss' ? losses + 1 : losses;
+  if (newWins > 4 || newLosses > 5) return 'Start';
+  if (outcome === 'win') return `${wins + 1}-${losses}`;
+  if (outcome === 'loss') return `${wins}-${losses + 1}`;
+  return currentNode;
+}
+
+// MT5 trade outcome endpoint - Updates position_sizing_state in Supabase
+app.post('/mt5/trade-outcome', async (req, res) => {
   console.log('Trade outcome received:', req.body);
   
-  // Extract trade outcome data
   const { ticket, outcome, symbol, closePrice, closeTime } = req.body;
   
-  // Here you would typically:
-  // 1. Update your database with the trade outcome
-  // 2. Send notification to your frontend
-  // 3. Update the trading alerts table
+  try {
+    const groupKey = POSITION_SIZING_MODE === 'per_pair'
+      ? (symbol || 'UNKNOWN').toUpperCase()
+      : 'GLOBAL';
+    const { data: state } = await supabase
+      .from('position_sizing_state')
+      .select('*')
+      .eq('group_key', groupKey)
+      .maybeSingle();
+    
+    const currentNode = state?.current_node || 'Start';
+    const nextNode = advanceNode(currentNode, outcome);
+    
+    const { error: upsertError } = await supabase
+      .from('position_sizing_state')
+      .upsert({ group_key: groupKey, current_node: nextNode }, { onConflict: 'group_key' });
+    
+    if (upsertError) {
+      console.error('Failed to update position_sizing_state:', upsertError);
+    } else {
+      console.log(`Position sizing [${POSITION_SIZING_MODE}]: ${symbol} ${outcome} → ${currentNode} → ${nextNode} (${groupKey})`);
+    }
+  } catch (err) {
+    console.error('Error updating position sizing:', err);
+  }
   
   console.log(`Trade ${ticket} (${symbol}) marked as ${outcome} at ${closePrice}`);
   
@@ -190,6 +299,7 @@ app.get('/health', (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 Trading backend running on port ${PORT}`);
+  console.log(`📊 Position sizing mode: ${POSITION_SIZING_MODE}`);
   console.log(`📊 Status: http://localhost:${PORT}/status`);
   console.log(`❤️  Health: http://localhost:${PORT}/health`);
 });

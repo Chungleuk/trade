@@ -8,8 +8,9 @@ export const useWebhookAlerts = () => {
   const [alerts, setAlerts] = useState<TradingAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://trading-backend-4v0f.onrender.com';
   const [webhookConfig, setWebhookConfig] = useState<WebhookConfig>({
-    url: `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook`,
+    url: `${backendUrl}/webhook`,
     isActive: false
   });
   const [isConnected, setIsConnected] = useState(false);

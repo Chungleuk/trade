@@ -9,8 +9,9 @@ export const SimpleWebhookDisplay: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Get the correct webhook URL from Supabase
-  const actualWebhookUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook`;
+  // Use Render backend (no Supabase Edge Function - free tier)
+  const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://trading-backend-4v0f.onrender.com';
+  const actualWebhookUrl = `${backendUrl}/webhook`;
 
   const copyWebhookUrl = async () => {
     try {

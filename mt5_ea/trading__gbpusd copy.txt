@@ -1,9 +1,9 @@
 //@version=6
-strategy('FXCM_XAUUSD 15M VIDYA Strategy [FIXED SYNC]', 
+strategy('FXCM**GBPUSD VIDYA Strategy v5 - SYNC FIXED', 
      overlay=true, 
      max_lines_count=500, 
      max_labels_count=500, 
-     precision=3,
+     precision=5,
      default_qty_type=strategy.cash, 
      default_qty_value=10000, 
      initial_capital=100000,
@@ -19,12 +19,36 @@ var string G_SIGNAL = "Signal Settings"
 var string G_RISK = "Risk Management"
 var string G_ADV = "Advanced Filters"
 var string G_STATS = "Statistics Settings"
+var string G_V5 = "v5 Stability Improvements"
+var string G_EMA = "EMA Trend Filter"
 var string G_RANGE = "Range Market Detection"
-var string G_TURTLE = "Turtle Breakout Strategy"
+var string G_SESSION = "Trading Sessions"
 
 // ──────────────────────── Key Level Variables ────────────────────────
 var float lastKeyResistance = na
 var float lastKeySupport = na
+
+// ──────────────────── Recent Trade Analysis ────────────────────
+var array<bool> recentTradeResults = array.new_bool()
+var int totalTrades = 0
+var int totalWins = 0
+var int totalLosses = 0
+var int currentWinStreak = 0
+var int currentLossStreak = 0
+var int maxWinStreak = 0
+var int maxWinStreakTime = na
+var int maxLossStreak = 0
+var int maxLossStreakTime = na
+var int lastTradeCloseBar = 0
+var string lastTradeID = ""
+var int firstTradeTime = na
+var int warmupWins = 0
+
+// Separate counters for Buy/Sell win rates
+var int totalBuyTrades = 0
+var int totalSellTrades = 0
+var int buyWins = 0
+var int sellWins = 0
 
 // ──────────────────── Core Functions ────────────────────
 calculateRR(bool isBuy, float entry, float target, float stop) =>
@@ -37,26 +61,28 @@ calculateRR(bool isBuy, float entry, float target, float stop) =>
         reward = entry - target
         reward / math.max(0.0001, risk)
 
+// FIXED: Consistent stop price calculation
 getStopPrice(bool isBuy, float entry) =>
     atr_value = ta.atr(14)
-    // Weighted average for "2.5 bars" effect
-    swing2Low = ta.lowest(low, 2)
-    swing3Low = ta.lowest(low, 3)
-    swing2High = ta.highest(high, 2)
-    swing3High = ta.highest(high, 3)
-    swingLow = (swing2Low + swing3Low) / 2  // Blended 2.5-bar equivalent
-    swingHigh = (swing2High + swing3High) / 2  // Blended 2.5-bar equivalent
     
+    float stopPrice = na
     if isBuy
-        atrStop = na(atr_value) ? na : entry - atr_value * 0.8  // Reduced from 1.2 to 0.8 for tighter stops
-        keyStop = na(lastKeySupport) ? atrStop : math.max(lastKeySupport, atrStop)
-        candidate = na(swingLow) ? keyStop : math.max(swingLow, keyStop)
-        nz(candidate, entry - 80 * syminfo.mintick)  // Reduced from 100 to 80
+        // For buys: ATR-based stop below entry
+        stopPrice := entry - (atr_value * 1.5)
     else
-        atrStop = na(atr_value) ? na : entry + atr_value * 0.8  // Reduced from 1.2 to 0.8 for tighter stops
-        keyStop = na(lastKeyResistance) ? atrStop : math.min(lastKeyResistance, atrStop)
-        candidate = na(swingHigh) ? keyStop : math.min(swingHigh, keyStop)
-        nz(candidate, entry + 80 * syminfo.mintick)  // Reduced from 100 to 80
+        // For sells: ATR-based stop above entry  
+        stopPrice := entry + (atr_value * 1.5)
+    
+    // Ensure stop is valid and not too close
+    minDistance = syminfo.mintick * 5  // Minimum 5 pips distance
+    if isBuy
+        stopPrice := math.min(stopPrice, entry - minDistance)
+    else
+        stopPrice := math.max(stopPrice, entry + minDistance)
+    
+    // Round to proper precision
+    stopPrice := math.round(stopPrice / syminfo.mintick) * syminfo.mintick
+    stopPrice
 
 // ────────────────────────── Trade ID Generation ──────────────────────────
 var int tradeIdCounter = 0
@@ -96,11 +122,11 @@ plot(not na(lastKeyResistance) ? lastKeyResistance : na, title="Resistance", col
 plot(not na(lastKeySupport) ? lastKeySupport : na, title="Support", color=color.new(#0000ff, 30), linewidth=2, style=plot.style_circles)
 
 // ──────────────────────── Input Settings ────────────────────────
-// VIDYA Settings (Restored to baseline - proven 55% winrate)
-vidya_length = input.int(6, 'VIDYA Length', minval=1, group=G_VIDYA)
-vidya_momentum = input.int(12, 'VIDYA Momentum', minval=1, group=G_VIDYA)
-band_distance = input.float(1.6, 'Band Distance', step=0.1, minval=0.1, group=G_VIDYA)
-vidya_smoothing = input.int(8, 'VIDYA Smoothing', minval=1, group=G_VIDYA)
+// VIDYA Settings
+vidya_length = input.int(8, 'VIDYA Length', minval=1, group=G_VIDYA)
+vidya_momentum = input.int(10, 'VIDYA Momentum', minval=1, group=G_VIDYA)
+band_distance = input.float(2.0, 'Band Distance', step=0.1, minval=0.1, group=G_VIDYA)
+vidya_smoothing = input.int(6, 'VIDYA Smoothing', minval=1, group=G_VIDYA)
 source = input.source(close, 'Price Source', group=G_VIDYA)
 
 // Visual Settings
@@ -109,14 +135,14 @@ down_trend_color = input.color(color.new(#ee3f79, 80), 'Downtrend', group=G_VISU
 use_shadow = input.bool(true, 'Use Fill Shadow', group=G_VISUAL)
 band_width = input.int(2, 'VIDYA Line Width', minval=1, maxval=4, group=G_VISUAL)
 
-// Volume Pressure Settings (Restored)
+// Volume Pressure Settings
 signal_smoothing = input.int(4, "Signal Smoothing", minval=1, group=G_VOL)
-min_volume_change = input.float(20.0, "Min Volume Change (%)", minval=0.1, step=0.1, group=G_VOL)
-vol_threshold_multiplier = input.float(2.8, "Volume Threshold", minval=0.1, step=0.1, group=G_VOL)
-vol_ma_length = input.int(20, "Volume MA Length", minval=1, group=G_VOL)
+min_volume_change = input.float(15.0, "Min Volume Change (%)", minval=0.1, step=0.1, group=G_VOL)
+vol_threshold_multiplier = input.float(1.8, "Volume Threshold", minval=0.1, step=0.1, group=G_VOL)
+vol_ma_length = input.int(30, "Volume MA Length", minval=1, group=G_VOL)
 
 // Signal Settings
-min_bars_between_signals = input.int(2, "Min Bars Between Signals", minval=1, maxval=20, group=G_SIGNAL)
+min_bars_between_signals = input.int(3, "Min Bars Between Signals", minval=1, maxval=20, group=G_SIGNAL)
 show_labels = input.bool(true, "Show Signal Labels", group=G_SIGNAL)
 show_trade_details = input.bool(true, "Show Trade Lines", group=G_SIGNAL)
 lines_duration = input.int(15, "Lines Duration (bars)", minval=5, maxval=100, group=G_SIGNAL)
@@ -131,13 +157,13 @@ loss_color = input.color(#ff0000, "LOSS Color", group=G_SIGNAL)
 
 // Advanced Filter Settings
 volumeConfirmation = input.bool(true, "Require Volume Confirmation", group=G_ADV)
-minVolumeIncrease = input.float(1.6, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.1, group=G_ADV)
+minVolumeIncrease = input.float(1.2, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.1, group=G_ADV)
 useTrendFilter = input.bool(true, "Use Trend Filter", group=G_ADV)
 useVolatilityFilter = input.bool(true, "Use Volatility Filter", group=G_ADV)
-minVolatilityPercentile = input.int(25, "Min Volatility Percentile", minval=0, maxval=100, group=G_ADV, tooltip="Optimized from 35 to 25 for XAUUSD high volatility - allows more trades while filtering low volatility")
-volatilityPeriod = input.int(18, "Volatility Period", minval=5, group=G_ADV)
-consecutiveBarsRequired = input.int(1, "Consecutive Bars Required", minval=1, maxval=5, group=G_ADV, tooltip="Optimized from 2 to 1 - allows faster entries while still requiring momentum confirmation")
-waitForConfirmation = input.bool(true, "Wait for Bar Close (Anti-Repainting)", group=G_ADV, tooltip="If enabled, signals will only trigger after the bar closes, preventing repainting")
+minVolatilityPercentile = input.int(20, "Min Volatility Percentile", minval=0, maxval=100, group=G_ADV)
+volatilityPeriod = input.int(20, "Volatility Period", minval=5, group=G_ADV)
+consecutiveBarsRequired = input.int(1, "Consecutive Bars Required", minval=1, maxval=5, group=G_ADV)
+waitForConfirmation = input.bool(true, "Wait for Bar Close (Anti-Repainting)", group=G_ADV)
 
 // Price Action Confirmation Settings (15M Timeframe Optimized)
 usePriceActionConfirmation = input.bool(true, "Use Price Action Confirmation", group=G_ADV)
@@ -147,59 +173,73 @@ usePriceStructure = input.bool(true, "Use Price Structure (HH/HL, LH/LL)", group
 useSupportResistance = input.bool(false, "Use Support/Resistance Bounce", group=G_ADV)
 
 // Breakout Settings
-lookbackPeriod = input.int(22, "Lookback Period", minval=5, group=G_ADV)
-minBreakoutSize = input.float(1.5, "Min Breakout Size (ATR %)", minval=0.1, step=0.1, group=G_ADV, tooltip="Optimized from 1.2% to 1.5% ATR for XAUUSD - filters false breakouts while allowing real ones")
+lookbackPeriod = input.int(25, "Lookback Period", minval=5, group=G_ADV)
+minBreakoutSize = input.float(0.6, "Min Breakout Size (ATR %)", minval=0.1, step=0.1, group=G_ADV)
 atrPeriod = input.int(14, "ATR Period", minval=5, group=G_ADV)
-minAtrFilter = input.float(0.001, "Min ATR Filter", step=0.001, minval=0.0001, group=G_ADV)
+minAtrFilter = input.float(0.0002, "Min ATR Filter", step=0.0001, minval=0.0001, group=G_ADV)
 
 // Statistics Settings
-warmupPeriod = input.int(3, "Warm-up Period (Trades to Ignore)", minval=0, maxval=20, group=G_STATS)
+warmupPeriod = input.int(5, "Warm-up Period (Trades to Ignore)", minval=0, maxval=20, group=G_STATS)
 recentWindowSize = input.int(120, "Recent Trades Window Size", minval=10, maxval=200, group=G_STATS)
 showFirstTradeDate = input.bool(true, "Show First Trade Date", group=G_STATS)
 
+// EMA Trend Filter Settings (OPTIMIZED: Disabled by default for faster entries)
+useHTFEMAConfirmation = input.bool(false, "Use Higher Timeframe EMA", group=G_EMA, tooltip="Confirm VIDYA trend with higher timeframe EMA - DISABLED for faster entries")
+ema200Length = input.int(200, "HTF EMA Length", minval=50, maxval=500, group=G_EMA, tooltip="EMA length for higher timeframe confirmation")
+htfTimeframe = input.timeframe("60", "HTF Timeframe", group=G_EMA, tooltip="Higher timeframe used for EMA confirmation")
+
+// ──────────────────── v5 STABILITY IMPROVEMENTS ────────────────────
+// 1. 3-Bar Entry Confirmation (OPTIMIZED: Disabled for faster entries - reduces late entry issue)
+use_3bar_confirmation = input.bool(false, "Use 3-Bar Entry Confirmation", group=G_V5, tooltip="DISABLED - Was causing late entries, removed for faster signal generation")
+
+// 2. Adaptive Position Sizing (REMOVED - fixed position sizing used, MT5 EA handles sizing)
+// Position sizing is now fixed at strategy default_qty_value
+
+// 3. Loss Cooldown Period
+use_cooldown = input.bool(true, "Use Loss Cooldown", group=G_V5)
+cooldown_bars = input.int(3, "Cooldown Bars After Loss", minval=1, maxval=10, group=G_V5)
+
+// 4. Market Regime Detection
+use_regime_detection = input.bool(true, "Use Market Regime Detection", group=G_V5)
+regime_period = input.int(50, "Regime Detection Period", minval=20, maxval=100, group=G_V5)
+trending_threshold = input.float(0.6, "Trending Threshold", minval=0.3, maxval=1.0, step=0.1, group=G_V5)
+
+// 5. Volatility Percentile Filtering
+use_volatility_filter = input.bool(true, "Use Volatility Filter", group=G_V5)
+min_volatility_percentile = input.int(20, "Min Volatility Percentile", minval=0, maxval=100, group=G_V5)
+
+// 6. STRICT 1:1 Risk/Reward (Removed dynamic RR)
+// 7. Enhanced Dashboard
+show_v5_dashboard = input.bool(true, "Show v5 Dashboard", group=G_V5)
+
+// Consolidation Detection Settings
+consolidationPeriod = input.int(20, "Consolidation Period (bars)", minval=1, group=G_RISK)
+consolidationThreshold = input.float(0.4, "Consolidation Threshold (ATR multiple)", minval=0.1, step=0.1, group=G_RISK)
+
 // ──────────────────── Enhanced Range Market Detection ────────────────────
 rangeDetectionPeriod = input.int(20, "Range Detection Period", minval=10, maxval=50, group=G_RANGE)
-rangeThreshold = input.float(0.6, "Range Threshold (ATR multiple)", minval=0.1, maxval=1.0, step=0.05, group=G_RANGE, tooltip="Relaxed to 0.6 for XAUUSD - allows more trades in volatile markets")
-adxThreshold = input.int(15, "ADX Threshold (Trend Strength)", minval=10, maxval=40, group=G_RANGE, tooltip="Reduced to 15 - much less restrictive for XAUUSD high volatility")
+rangeThreshold = input.float(0.55, "Range Threshold (ATR multiple)", minval=0.1, maxval=1.0, step=0.05, group=G_RANGE, tooltip="Relaxed to 0.55 for GBPUSD - allows more trades")
+adxThreshold = input.int(15, "ADX Threshold (Trend Strength)", minval=10, maxval=40, group=G_RANGE, tooltip="Reduced to 15 - much less restrictive for GBPUSD")
 useADXFilter = input.bool(true, "Use ADX Trend Filter", group=G_RANGE)
 useRangeFilter = input.bool(true, "Enable Range Market Filter", group=G_RANGE)
 
-// Higher Timeframe Trend Confirmation (ASYMMETRIC: Lenient for buys, stricter for sells)
-useHTFTrendFilter = input.bool(true, "Use HTF Trend Filter", group=G_RANGE, tooltip="Confirm trend on higher timeframe (1H) - Uses ASYMMETRIC logic: lenient for buys (58.9% WR), strict for sells (improve from 48.1%)")
+// Higher Timeframe Trend Confirmation (CRITICAL: Enable for better quality trades - filters out counter-trend entries)
+useHTFTrendFilter = input.bool(true, "Use HTF Trend Filter", group=G_RANGE, tooltip="Confirm trend on higher timeframe (1H) - ENABLED by default to filter counter-trend trades")
 htfRangeTF = input.timeframe("60", "HTF for Range Check", group=G_RANGE, tooltip="Higher timeframe for trend confirmation")
 htfEMALength = input.int(50, "HTF EMA Length", minval=20, maxval=200, group=G_RANGE)
-htfADXThreshold = input.int(15, "HTF ADX Threshold for Buys", minval=10, maxval=35, group=G_RANGE, tooltip="For buy trades - allows weak trends (optimized at 15)")
-htfADXThresholdSell = input.int(18, "HTF ADX Threshold for Sells", minval=10, maxval=35, group=G_RANGE, tooltip="STRICTER for sell trades (18 vs 15) - requires stronger confirmation for counter-trend sells")
+htfADXThreshold = input.int(15, "HTF ADX Threshold", minval=10, maxval=35, group=G_RANGE, tooltip="Reduced from 18 to 15 - allows more trades while maintaining quality (optimized for GBPUSD)")
 
-// ──────────────────── Turtle Breakout Strategy Settings (OPTIONAL) ────────────────────
-// Turtle confirmation is OPTIONAL - adds Donchian breakout as additional entry filter
-// Exits are DISABLED to maintain consistent 1:1 RR at target/stop only
-useTurtleConfirmation = input.bool(false, "Require Turtle Confirmation", group=G_TURTLE, tooltip="When enabled, requires BOTH market structure AND Turtle/Donchian breakout for entry (more restrictive, potentially higher quality)")
-turtleSystem1Only = input.bool(true, "Use System 1 Only (Faster Signals)", group=G_TURTLE, tooltip="ENABLED - Only require System 1 breakout for faster signal generation")
-turtleSystem1Length = input.int(15, "System 1 Breakout Length", minval=5, maxval=100, group=G_TURTLE, tooltip="Reduced from 20 to 15 bars - faster breakout detection")
-turtleSystem2Length = input.int(55, "System 2 Breakout Length", minval=20, maxval=200, group=G_TURTLE, tooltip="Long-term Donchian Channel period")
-turtleExit1Length = input.int(10, "System 1 Exit Length", minval=3, maxval=50, group=G_TURTLE, tooltip="Short-term exit period")
-turtleExit2Length = input.int(20, "System 2 Exit Length", minval=5, maxval=100, group=G_TURTLE, tooltip="Long-term exit period")
-turtleStopATR = input.float(1.5, "Turtle Stop ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group=G_TURTLE, tooltip="ATR multiplier for Turtle stop loss")
-useOppositeBreakoutExit = input.bool(false, "Use Opposite Breakout Exit", group=G_TURTLE, tooltip="DISABLED by default - Set to false for consistent 1:1 RR (only exit at target/stop)")
-showDonchianChannels = input.bool(false, "Show Donchian Channels", group=G_TURTLE)
-
-// ──────────────────── Trading Session Settings ────────────────────
-var string G_SESSION = "Trading Sessions"
-useSessionFilter = input.bool(true, "Enable Session Filter", group=G_SESSION, tooltip="Only trade during London and New York sessions")
-tradeLondonSession = input.bool(true, "Trade London Session", group=G_SESSION, tooltip="08:00 - 17:00 UTC")
-tradeNewYorkSession = input.bool(true, "Trade New York Session", group=G_SESSION, tooltip="13:00 - 22:00 UTC")
+// ──────────────────── Trading Session Filter Settings ────────────────────
+useSessionFilter = input.bool(true, "Enable Session Filter", group=G_SESSION, tooltip="Trade only during London and New York sessions")
+tradeLondonSession = input.bool(true, "Trade London Session", group=G_SESSION)
+tradeNewYorkSession = input.bool(true, "Trade New York Session", group=G_SESSION)
 londonStart = input.int(8, "London Start (UTC Hour)", minval=0, maxval=23, group=G_SESSION)
 londonEnd = input.int(17, "London End (UTC Hour)", minval=0, maxval=23, group=G_SESSION)
 nyStart = input.int(13, "NY Start (UTC Hour)", minval=0, maxval=23, group=G_SESSION)
 nyEnd = input.int(22, "NY End (UTC Hour)", minval=0, maxval=23, group=G_SESSION)
 
-// ──────────────────── Consolidation Detection Settings ────────────────────
-consolidationPeriod = input.int(12, "Consolidation Period (bars)", minval=1, group=G_RISK)
-consolidationThreshold = input.float(0.35, "Consolidation Threshold (ATR multiple)", minval=0.1, step=0.1, group=G_RISK)
-
-// ──────────────────── Risk Management Settings ────────────────────
-rrRatio = input.float(1.05, "Risk Reward Ratio", minval=1.0, maxval=5.0, step=0.1, group=G_RISK, tooltip="Risk:Reward ratio (e.g., 1.0 = 1:1, 2.0 = 1:2)")
+// Risk Management Settings - Risk/Reward Ratio
+rrRatio = input.float(1.05, "Risk Reward Ratio", minval=0.1, maxval=5.0, step=0.1, group=G_RISK, tooltip="Risk:Reward ratio (e.g., 1.0 = 1:1, 2.0 = 1:2)")
 maxRiskPercent = input.float(1.0, "Max Risk % per Trade", minval=0.1, maxval=5.0, step=0.1, group=G_RISK)
 maxTradeDuration = input.int(1000, "Max Trade Duration (bars)", minval=5, maxval=1000, group=G_RISK, tooltip="Set to 1000 to effectively disable duration exit - ensures consistent 1:1 RR")
 
@@ -209,64 +249,31 @@ slippagePct = input.float(0.03, "Slippage (%)", minval=0, step=0.01, group=G_RIS
 commissionPct = input.float(0.03, "Commission (%)", minval=0, step=0.01, group=G_RISK)
 
 // ──────────────────── Market Structure (Wave-based Stop) ────────────────────
-// NOTE: Now using WEIGHTED AVERAGE (2-bar + 3-bar blend) for effective "2.5 bars" lookback
-// This setting is displayed but overridden by the blended calculation below
-waveLength = input.int(3, "Wave Length (Display Only)", minval=2, maxval=15, group=G_RISK, tooltip="USING WEIGHTED AVERAGE: Blends 2-bar and 3-bar lookbacks for '2.5 bars' effect - tighter than 3, safer than 2")
-waveLengthSell = input.int(3, "Wave Length SELL (Display Only)", minval=2, maxval=20, group=G_RISK, tooltip="USING WEIGHTED AVERAGE: Same blended approach for sell stops")
+waveLength = input.int(5, "Wave Length (Stop Calculation)", minval=3, maxval=15, group=G_RISK, tooltip="Number of bars to look back for wave high/low (used for stop placement)")
 
 // ──────────────────── RSI Entry Filter Only (RSI Exit Removed for Consistent RR) ────────────────────
 rsiLength = input.int(14, "RSI Length", minval=2, maxval=50, group=G_RISK, tooltip="RSI period for entry filter only (exit removed for consistent RR)")
 
 // ──────────────────── RSI Entry Filter (Improve Winrate) ────────────────────
 useRsiEntryFilter = input.bool(true, "Enable RSI Entry Filter", group=G_RISK, tooltip="Prevent entries when RSI is already overbought/oversold to improve winrate")
-rsiEntryFilterBuyMax = input.int(68, "RSI Entry Filter (Buy Max)", minval=50, maxval=80, group=G_RISK, tooltip="Optimized to 68 - Only enter BUY when RSI is below this level (buy winrate: 58.9%)")
-rsiEntryFilterSellMin = input.int(38, "RSI Entry Filter (Sell Min)", minval=20, maxval=60, group=G_RISK, tooltip="BALANCED (raised from 32 to 38) - Only enter SELL when RSI is above this level, avoiding oversold entries")
+rsiEntryFilterBuyMax = input.int(68, "RSI Entry Filter (Buy Max)", minval=50, maxval=80, group=G_RISK, tooltip="Only enter BUY when RSI is below this level (optimized for GBPUSD)")
+rsiEntryFilterSellMin = input.int(32, "RSI Entry Filter (Sell Min)", minval=20, maxval=50, group=G_RISK, tooltip="Only enter SELL when RSI is above this level (optimized for GBPUSD)")
 
 // ──────────────────── Loss Protection Settings ────────────────────
 useLossProtection = input.bool(true, "Enable Loss Protection", group=G_RISK, tooltip="Prevent trades at similar price levels after losses")
-lossCooldownBars = input.int(10, "Loss Cooldown (bars)", minval=0, maxval=100, group=G_RISK, tooltip="Minimum bars to wait after a loss before allowing similar trades")
-minPriceDistanceFromLoss = input.float(0.5, "Min Distance from Loss (points)", minval=0.0, step=0.1, group=G_RISK, tooltip="Minimum price distance from recent losing entry (in points, adjusted for XAUUSD 3-decimal precision)")
+lossCooldownBars = input.int(20, "Loss Cooldown (bars)", minval=0, maxval=100, group=G_RISK, tooltip="Minimum bars to wait after a loss before allowing similar trades")
+minPriceDistanceFromLoss = input.float(0.0006, "Min Distance from Loss (points)", minval=0.0, step=0.0001, group=G_RISK, tooltip="Minimum price distance from recent losing entry (in points, adjusted for GBPUSD 5-decimal precision)")
 maxRecentLossesToTrack = input.int(2, "Max Recent Losses to Track", minval=1, maxval=10, group=G_RISK, tooltip="Number of recent losses to check distance against")
 useATRBasedDistance = input.bool(true, "Use ATR-Based Distance", group=G_RISK, tooltip="Use ATR multiplier instead of fixed points for distance calculation")
 lossDistanceATRMultiplier = input.float(1.3, "Loss Distance ATR Multiplier", minval=0.5, maxval=5.0, step=0.1, group=G_RISK, tooltip="ATR multiplier for minimum distance")
 useRecentWinOverride = input.bool(false, "Recent Win Override", group=G_RISK, tooltip="Allow trades closer to losses if there was a recent win (disabled by default - more conservative)")
 useMarketStructureCheck = input.bool(false, "Market Structure Check", group=G_RISK, tooltip="Allow trades if market structure has changed (disabled by default - more conservative)")
 structureChangeBars = input.int(15, "Structure Change Lookback", minval=5, maxval=30, group=G_RISK, tooltip="Bars to look back for structure change detection")
-structureChangePercent = input.float(0.3, "Structure Change %", minval=0.1, maxval=2.0, step=0.1, group=G_RISK, tooltip="Price must move this % above/below loss level to trigger override (adjusted for XAUUSD)")
+structureChangePercent = input.float(0.4, "Structure Change %", minval=0.1, maxval=2.0, step=0.1, group=G_RISK, tooltip="Price must move this % above/below loss level to trigger override (adjusted for GBPUSD)")
 
 // ──────────────────────── Core Calculation Logic ────────────────────────
 atr_value = ta.atr(atrPeriod)
 avgVolume = ta.sma(volume, 20)
-
-// ──────────────────── Trading Session Detection ────────────────────
-// Get current hour in UTC
-currentHourUTC = hour(time, "UTC")
-
-// London Session (08:00 - 17:00 UTC)
-inLondonSession = false
-if tradeLondonSession
-    if londonStart <= londonEnd
-        inLondonSession := currentHourUTC >= londonStart and currentHourUTC < londonEnd
-    else
-        // Handle session that spans midnight
-        inLondonSession := currentHourUTC >= londonStart or currentHourUTC < londonEnd
-
-// New York Session (13:00 - 22:00 UTC)
-inNewYorkSession = false
-if tradeNewYorkSession
-    if nyStart <= nyEnd
-        inNewYorkSession := currentHourUTC >= nyStart and currentHourUTC < nyEnd
-    else
-        // Handle session that spans midnight
-        inNewYorkSession := currentHourUTC >= nyStart or currentHourUTC < nyEnd
-
-// Combined session filter (allow trade if in any enabled session)
-inAllowedSession = not useSessionFilter or inLondonSession or inNewYorkSession
-
-// Hong Kong time block: avoid signals between 03:30-05:00 HKT (19:30-21:00 UTC)
-currentMinuteUTC = minute(time)
-inHKBlockPeriod = (currentHourUTC == 19 and currentMinuteUTC >= 30) or (currentHourUTC == 20)
-notInHKBlockPeriod = not inHKBlockPeriod
 
 // Volatility Percentile Calculation
 volatilityPercentile = ta.percentrank(atr_value, volatilityPeriod) * 100
@@ -274,17 +281,18 @@ volatilityPercentile = ta.percentrank(atr_value, volatilityPeriod) * 100
 // ──────────────────── RSI Calculation (Entry Filter Only) ────────────────────
 rsiValue = ta.rsi(close, rsiLength)
 
-// Wave-based stop calculation (Market Structure) - WEIGHTED AVERAGE for "2.5" effect
-// Blend 2-bar and 3-bar lookbacks for intermediate stop placement
+// Wave-based stop calculation (Market Structure) - WEIGHTED AVERAGE for tighter stops
+// Blend 2-bar and 3-bar lookbacks for intermediate stop placement (optimized for GBPUSD)
 wave2barLow = ta.lowest(low, 2)
 wave3barLow = ta.lowest(low, 3)
 wave2barHigh = ta.highest(high, 2)
 wave3barHigh = ta.highest(high, 3)
 
-// 50/50 blend = effective "2.5 bars" lookback
+// 50/50 blend = effective "2.5 bars" lookback for tighter, responsive stops
 currentWaveLow = (wave2barLow + wave3barLow) / 2     // Blended wave low for buy stops
 currentWaveHigh = (wave2barHigh + wave3barHigh) / 2  // Blended wave high for sell stops
 
+// ADX Calculation for Range Market Detection
 dirmovement(len) =>
     up = ta.change(high)
     down = -ta.change(low)
@@ -299,6 +307,16 @@ dirmovement(len) =>
 
 [adx, plusDI, minusDI] = dirmovement(14)
 
+// Higher Timeframe EMA Confirmation
+var float htfEma200 = na
+htfEmaTrendUp = true
+htfEmaTrendDown = true
+if useHTFEMAConfirmation
+    htfEma200 := request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, ema200Length), lookahead=barmerge.lookahead_off)
+    htfClose = request.security(syminfo.tickerid, htfTimeframe, close, lookahead=barmerge.lookahead_off)
+    htfEmaTrendUp := not na(htfClose) and not na(htfEma200) and htfClose > htfEma200
+    htfEmaTrendDown := not na(htfClose) and not na(htfEma200) and htfClose < htfEma200
+
 // VIDYA Calculation Function
 vidya_calc(src, len, mom, smooth) =>
     momentum = ta.change(src)
@@ -309,6 +327,49 @@ vidya_calc(src, len, mom, smooth) =>
     var float vidya_val = src
     vidya_val := alpha * abs_cmo / 100 * src + (1 - alpha * abs_cmo / 100) * nz(vidya_val[1])
     ta.sma(vidya_val, smooth)
+
+// ──────────────────── v5 IMPROVEMENTS IMPLEMENTATION ────────────────────
+
+// 1. 3-Bar Entry Confirmation System
+var int bullishConfirmationBars = 0
+var int bearishConfirmationBars = 0
+
+// Update confirmation bars
+if barstate.isconfirmed
+    if close > open and high > high[1]
+        bullishConfirmationBars := bullishConfirmationBars + 1
+        bearishConfirmationBars := 0
+    else if close < open and low < low[1]
+        bearishConfirmationBars := bearishConfirmationBars + 1
+        bullishConfirmationBars := 0
+    else
+        bullishConfirmationBars := 0
+        bearishConfirmationBars := 0
+
+valid3BarBullish = not use_3bar_confirmation or bullishConfirmationBars >= 3
+valid3BarBearish = not use_3bar_confirmation or bearishConfirmationBars >= 3
+
+// Adaptive position sizing removed - using fixed position sizing (default_qty_value)
+
+// 3. Loss Cooldown System
+var int cooldownCounter = 0
+var bool inCooldown = false
+
+// Update cooldown counter
+if inCooldown
+    cooldownCounter := cooldownCounter + 1
+    if cooldownCounter >= cooldown_bars
+        inCooldown := false
+        cooldownCounter := 0
+
+// 4. Market Regime Detection
+atr_ma = ta.sma(atr_value, regime_period)
+atr_ratio = atr_value / atr_ma
+is_trending_market = atr_ratio > trending_threshold
+is_ranging_market = not is_trending_market
+
+// 5. Enhanced Volatility Filtering
+volatilityFilterPassed = not use_volatility_filter or volatilityPercentile >= min_volatility_percentile
 
 // State Variables
 var bool is_trend_up = false
@@ -364,63 +425,66 @@ is_strong_sell = volRatio < -threshold and volRatio < signalLine and volRatio < 
 
 is_trend_confirmed = (is_strong_buy and is_trend_up) or (is_strong_sell and not is_trend_up)
 
-// ──────────────────── Trade Management Variables ────────────────────
+// ──────────────────── Trade Management Variables (DECLARED EARLY) ────────────────────
 var float buy_entry = na
 var float buy_target = na
 var float buy_stop = na
-var float buy_original_stop = na  // Original stop for RR calculation
-
 var float sell_entry = na
 var float sell_target = na
 var float sell_stop = na
-var float sell_original_stop = na  // Original stop for RR calculation
+var float signal_buy_entry = na
+var float signal_buy_target = na  
+var float signal_buy_stop = na
+var float signal_buy_original_stop = na
+var float signal_sell_entry = na
+var float signal_sell_target = na
+var float signal_sell_stop = na
+var float signal_sell_original_stop = na
 
-// Calculate stop prices EVERY bar
-current_buy_stop = getStopPrice(true, close)
-current_sell_stop = getStopPrice(false, close)
+// ──────────────────── Signal Control Variables (DECLARED EARLY) ────────────────────
+var bool inTrade = false
+var int lastTradeBar = 0
+var int lastSignalBar = 0
+var bool tradeCompleted = true
+var bool tradeSuccess = false
+var float currentEntry = na
+var float currentTarget = na
+var float currentStop = na
+var bool isBuyTrade = false
+var int entryBarIndex = 0
+var float exitPrice = na
+var string exitReason = na
+var int lastLabelBar = 0
 
-// ──────────────────── Loss Protection Tracking Variables (MOVED BEFORE COMPREHENSIVE FILTERS) ────────────────────
-// Track recent losses: entry price, bar index, and trade direction (true = buy, false = sell)
-// These must be declared before the checkLossProtection function
+// ──────────────────── Loss Protection Tracking Variables (DECLARED EARLY) ────────────────────
 var array<float> recentLossEntries = array.new_float()
 var array<int> recentLossBars = array.new_int()
-var array<bool> recentLossDirections = array.new_bool()  // true = buy loss, false = sell loss
+var array<bool> recentLossDirections = array.new_bool()
 var int lastLossBar = na
 var float lastLossPrice = na
-var bool lastLossDirection = false  // false = no loss yet, true = buy loss, false = sell loss (after first loss)
-
-// Track recent wins for override logic
+var bool lastLossDirection = false
 var int lastWinBar = na
 var bool lastWinDirection = false
 
 // Calculate structure change values on each bar (Pine Script requirement for consistency)
-// These must be calculated BEFORE checkLossProtection function uses them
+// ta.highest/ta.lowest MUST be called on every bar unconditionally to avoid incorrect values
 structureChangeHigh = ta.highest(high, structureChangeBars)
 structureChangeLow = ta.lowest(low, structureChangeBars)
 
-// ──────────────────── Loss Protection Check Function (MOVED BEFORE COMPREHENSIVE FILTERS) ────────────────────
-// Enhanced check with recent win override and market structure detection
-// Pine Script requires ta.highest/ta.lowest to be called on each bar, so they're calculated above
+// ──────────────────── Loss Protection Check Function (DECLARED EARLY) ────────────────────
 checkLossProtection(bool isBuy, float entryPrice) =>
     if not useLossProtection
-        true  // Protection disabled, allow trade
+        true
     else
-        // Check cooldown period from last loss
         barsSinceLastLoss = na(lastLossBar) ? 999 : (bar_index - lastLossBar)
         cooldownPassed = barsSinceLastLoss >= lossCooldownBars
-        
-        // Calculate minimum distance required
         minDistance = useATRBasedDistance ? (atr_value * lossDistanceATRMultiplier) : (minPriceDistanceFromLoss * syminfo.mintick)
         
-        // Recent Win Override: Only if win was AFTER the loss and in same direction
         recentWinOverride = false
         if useRecentWinOverride and not na(lastWinBar) and not na(lastLossBar) and lastWinDirection == isBuy
-            // Win must be after the loss
             if lastWinBar > lastLossBar
                 barsSinceLastWin = bar_index - lastWinBar
-                // Win must be recent (within cooldown period) and in same direction
                 if barsSinceLastWin <= lossCooldownBars
-                    // Only apply override if entry is at least 70% of normal distance (more conservative)
                     recentWinOverride := true
         
         // Market Structure Check: Require significant price movement
@@ -429,26 +493,21 @@ checkLossProtection(bool isBuy, float entryPrice) =>
         if useMarketStructureCheck and not na(lastLossPrice)
             structureThreshold = lastLossPrice * (structureChangePercent / 100)
             if isBuy
-                // For buy: price must have moved significantly above loss level
                 if structureChangeHigh > lastLossPrice + structureThreshold
                     structureChanged := true
             else
-                // For sell: price must have moved significantly below loss level
                 if structureChangeLow < lastLossPrice - structureThreshold
                     structureChanged := true
         
-        // Apply overrides only if conditions are met AND still maintain minimum protection
-        overrideActive = (structureChanged or recentWinOverride) and barsSinceLastLoss >= (lossCooldownBars * 0.7)  // At least 70% of cooldown must pass
+        overrideActive = (structureChanged or recentWinOverride) and barsSinceLastLoss >= (lossCooldownBars * 0.7)
         
         if overrideActive
-            // Use more conservative reduced restrictions (80% of normal, not 60%)
-            reducedCooldown = math.max(10, lossCooldownBars * 0.7)  // At least 70% of normal cooldown
-            reducedDistance = minDistance * 0.8  // 80% of normal distance (more conservative)
+            reducedCooldown = math.max(10, lossCooldownBars * 0.7)
+            reducedDistance = minDistance * 0.8
             
             if barsSinceLastLoss < reducedCooldown
-                false  // Still in reduced cooldown
+                false
             else
-                // Check with reduced distance
                 lossCount = array.size(recentLossEntries)
                 tooClose = false
                 
@@ -471,30 +530,24 @@ checkLossProtection(bool isBuy, float entryPrice) =>
                 
                 not tooClose
         else
-            // Standard protection logic (no overrides)
             if not cooldownPassed
-                false  // Still in cooldown period
+                false
             else
-                // Check distance from all tracked recent losses (same direction only)
                 lossCount = array.size(recentLossEntries)
                 tooClose = false
                 
-                // Only check if there are any losses recorded
                 if lossCount > 0
                     for i = 0 to lossCount - 1
                         lossEntry = array.get(recentLossEntries, i)
                         lossBar = array.get(recentLossBars, i)
                         lossDirection = array.get(recentLossDirections, i)
                         
-                        // Only check losses in the same direction
                         if lossDirection == isBuy
-                            // Check if enough bars have passed since this loss
                             barsSinceThisLoss = bar_index - lossBar
                             if barsSinceThisLoss < lossCooldownBars
                                 tooClose := true
                                 break
                             
-                            // Check price distance
                             priceDistance = math.abs(entryPrice - lossEntry)
                             if priceDistance < minDistance
                                 tooClose := true
@@ -502,146 +555,71 @@ checkLossProtection(bool isBuy, float entryPrice) =>
                 
                 not tooClose
 
-// ──────────────────── Enhanced Range Market Detection ────────────────────
-// Enhanced Range Detection
-rangeHigh = ta.highest(high, rangeDetectionPeriod)
-rangeLow = ta.lowest(low, rangeDetectionPeriod)
-rangeSize = rangeHigh - rangeLow
-rangeSizeATR = rangeSize / atr_value
-
-isWeakTrend = useADXFilter and adx < adxThreshold
-isTightRange = rangeSizeATR < rangeThreshold
-
-// ──────────────────── Advanced Breakout Detection ────────────────────
-// ──────────────────── Market Structure Breakout Detection (CLEAN) ────────────────────
-// Pure pivot-based breakout detection - simple and effective
-// Entry when price closes above last pivot high (BUY) or below last pivot low (SELL)
+// ──────────────────── Breakout Detection (DECLARED EARLY - NEEDED BY CONDITIONS) ────────────────────
+// Market Structure Breakout Detection
 marketStructureBuyBreakout = not na(lastPivotHigh) and close > lastPivotHigh
 marketStructureSellBreakout = not na(lastPivotLow) and close < lastPivotLow
 
-// Legacy ATR breakout (keeping for reference but not using in filters)
-highestHigh = ta.highest(high[1], lookbackPeriod)
-lowestLow = ta.lowest(low[1], lookbackPeriod)
-minBreakoutAmount = atr_value * minBreakoutSize / 100
-significantBreakoutUp = (high - highestHigh) >= minBreakoutAmount
-significantBreakoutDown = (low - lowestLow) <= -minBreakoutAmount
-
-// ──────────────────── Turtle Breakout Strategy Calculations ────────────────────
-// Donchian Channels (System 1 & 2)
-donchianS1High = ta.highest(high, turtleSystem1Length)
-donchianS1Low = ta.lowest(low, turtleSystem1Length)
-donchianS2High = ta.highest(high, turtleSystem2Length)
-donchianS2Low = ta.lowest(low, turtleSystem2Length)
-
-// Turtle Breakout Signals (using previous bar to avoid repainting, but System 1 only enabled for faster entries)
-turtleLongS1 = ta.crossover(close, donchianS1High[1])
-turtleShortS1 = ta.crossunder(close, donchianS1Low[1])
-turtleLongS2 = ta.crossover(close, donchianS2High[1])
-turtleShortS2 = ta.crossunder(close, donchianS2Low[1])
-
-// Combined Turtle signals (either system can trigger, or System 1 only if enabled)
-turtleBuyBreakout = turtleSystem1Only ? turtleLongS1 : (turtleLongS1 or turtleLongS2)
-turtleSellBreakout = turtleSystem1Only ? turtleShortS1 : (turtleShortS1 or turtleShortS2)
-
-// Turtle Exit Signals (opposite breakout)
-turtleLongExitS1 = ta.crossunder(close, ta.lowest(low, turtleExit1Length))
-turtleShortExitS1 = ta.crossover(close, ta.highest(high, turtleExit1Length))
-turtleLongExitS2 = ta.crossunder(close, ta.lowest(low, turtleExit2Length))
-turtleShortExitS2 = ta.crossover(close, ta.highest(high, turtleExit2Length))
-
-// Combined Turtle exit signals
-turtleBuyExit = useOppositeBreakoutExit and (turtleShortS1 or turtleShortS2)
-turtleSellExit = useOppositeBreakoutExit and (turtleLongS1 or turtleLongS2)
-
-// ──────────────────── Higher Timeframe Trend Confirmation (MOVED BEFORE ENTRY CALCULATION) ────────────────────
+// Higher Timeframe Trend Confirmation
 htfClose = request.security(syminfo.tickerid, htfRangeTF, close, lookahead=barmerge.lookahead_off)
 htfHigh = request.security(syminfo.tickerid, htfRangeTF, high, lookahead=barmerge.lookahead_off)
 htfLow = request.security(syminfo.tickerid, htfRangeTF, low, lookahead=barmerge.lookahead_off)
 htfEMA = request.security(syminfo.tickerid, htfRangeTF, ta.ema(close, htfEMALength), lookahead=barmerge.lookahead_off)
 
-// HTF ADX calculation
 [htfADX, htfPlusDI, htfMinusDI] = request.security(syminfo.tickerid, htfRangeTF, dirmovement(14), lookahead=barmerge.lookahead_off)
-// Use minimum of buy/sell thresholds for range detection (range blocks ALL trades)
-isHTFRanging = useHTFTrendFilter and not na(htfADX) and htfADX < math.min(htfADXThreshold, htfADXThresholdSell)
-isHTFTrending = not na(htfADX) and htfADX >= math.min(htfADXThreshold, htfADXThresholdSell)
+isHTFRanging = useHTFTrendFilter and not na(htfADX) and htfADX < htfADXThreshold
+isHTFTrending = not na(htfADX) and htfADX >= htfADXThreshold
 
-// HTF Trend Direction (OPTIMIZED: Simplified - removed DI requirement for faster entries, EMA only)
 htfTrendUp = not na(htfClose) and not na(htfEMA) and htfClose > htfEMA
 htfTrendDown = not na(htfClose) and not na(htfEMA) and htfClose < htfEMA
 
-// HTF Trend alignment check (CALCULATED EARLY so it can be used in entry calculation)
-// ASYMMETRIC LOGIC: Keep buys lenient (working well at 58.9%), make sells STRICTER (improve from 48.1%)
 htfAlignedBuy = if useHTFTrendFilter
-    // HTF filter enabled: LENIENT for buys - allow if HTF uptrend OR not strongly downtrending
     htfTrendUp or not htfTrendDown or (not na(htfADX) and htfADX < 20)
 else
-    // HTF filter disabled: allow all buys
     true
 
 htfAlignedSell = if useHTFTrendFilter
-    // HTF filter enabled: BALANCED for sells - require downtrend OR not strongly uptrending OR weak trend
-    // More lenient than previous strict version to allow good local sell opportunities
-    htfTrendDown or not htfTrendUp or (not na(htfADX) and htfADX < htfADXThresholdSell)
+    htfTrendDown or not htfTrendUp or (not na(htfADX) and htfADX < 20)
 else
-    // HTF filter disabled: allow all sells
     true
 
-// Update range market detection to include HTF
-// CRITICAL FIX: Use market structure breakouts, not ATR breakouts!
-// Market structure breakouts COME FROM ranges, so allow them
-isRangeMarket = useRangeFilter and (isWeakTrend or isTightRange or isHTFRanging) and not marketStructureBuyBreakout and not marketStructureSellBreakout
-
-// ──────────────────── Consolidation Detection ────────────────────
-consolidationHigh = ta.highest(high, consolidationPeriod)
-consolidationLow = ta.lowest(low, consolidationPeriod)
-consolidationRange = consolidationHigh - consolidationLow
-consolidationATR = atr_value * consolidationThreshold
-
-// CRITICAL FIX: Use market structure breakouts, not ATR breakouts!
-// Market structure breakouts COME FROM consolidation, so allow them
-isConsolidating = not na(consolidationATR) and consolidationRange < consolidationATR and not marketStructureBuyBreakout and not marketStructureSellBreakout
-
-// ──────────────────── Advanced Breakout Detection (continued) ────────────────────
-validAtrCondition = not na(atr_value) and atr_value >= minAtrFilter
-
-// Volume confirmation
-volumeIncreaseCondition = not volumeConfirmation or volume > avgVolume * minVolumeIncrease
-
-// ──────────────────── Signal Control ────────────────────
-var bool inTrade = false
-var int lastTradeBar = 0
-var int lastSignalBar = 0
-var bool tradeCompleted = true
-var bool tradeSuccess = false
-var float currentEntry = na
-var float currentTarget = na
-var float currentStop = na
-var bool isBuyTrade = false
-var int entryBarIndex = 0
-var float exitPrice = na
-var string exitReason = na
-
-// Signal control
-var int lastLabelBar = 0
-
+// ──────────────────── Condition Variables (DECLARED EARLY) ────────────────────
 minBarsPassed = (bar_index - lastLabelBar >= min_bars_between_signals) and (bar_index - lastSignalBar >= min_bars_between_signals)
 midLevelAvailable = not na(midLevel)
-
-// Consecutive bars condition
 consecutiveBarsBuy = consecutiveBullishBars >= consecutiveBarsRequired
 consecutiveBarsSell = consecutiveBearishBars >= consecutiveBarsRequired
-
-// Volatility condition
 volatilityCondition = not useVolatilityFilter or (not na(volatilityPercentile)) and volatilityPercentile >= minVolatilityPercentile
-
-// Bar confirmation condition for anti-repainting
 barConfirmation = not waitForConfirmation or barstate.isconfirmed
+volumeIncreaseCondition = not volumeConfirmation or volume > avgVolume * minVolumeIncrease
 
-// Turtle confirmation conditions
-turtleBuyConfirmation = not useTurtleConfirmation or turtleBuyBreakout
-turtleSellConfirmation = not useTurtleConfirmation or turtleSellBreakout
+// ======================== SESSION DETECTION (LONDON & NEW YORK) ========================
+currentHourUTC = hour(time, "UTC")
+inLondonSession = false
+if tradeLondonSession
+    if londonStart <= londonEnd
+        inLondonSession := currentHourUTC >= londonStart and currentHourUTC < londonEnd
+    else
+        inLondonSession := currentHourUTC >= londonStart or currentHourUTC < londonEnd
 
-// ──────────────────── Enhanced Price Action Confirmation (15M Optimized) ────────────────────
+inNewYorkSession = false
+if tradeNewYorkSession
+    if nyStart <= nyEnd
+        inNewYorkSession := currentHourUTC >= nyStart and currentHourUTC < nyEnd
+    else
+        inNewYorkSession := currentHourUTC >= nyStart or currentHourUTC < nyEnd
+
+inAllowedSession = not useSessionFilter or inLondonSession or inNewYorkSession
+
+// Hong Kong time block: avoid signals between 03:30-05:00 HKT (19:30-21:00 UTC)
+currentMinuteUTC = minute(time)
+inHKBlockPeriod = (currentHourUTC == 19 and currentMinuteUTC >= 30) or (currentHourUTC == 20)
+notInHKBlockPeriod = not inHKBlockPeriod
+
+// Turtle confirmation (not used in GBPUSD, always true)
+turtleBuyConfirmation = true
+turtleSellConfirmation = true
+
+// ──────────────────── Enhanced Price Action Confirmation (MOVED BEFORE FILTERS) ────────────────────
 // Candlestick Pattern Detection
 bodySize = math.abs(close - open)
 candleRange = high - low
@@ -661,6 +639,8 @@ strongBearishCandle = close < open and bodySize > candleRange * 0.6 and close < 
 
 // Price Structure Analysis (Higher Highs/Lows, Lower Highs/Lows)
 lookbackStructure = 5  // Look back 5 bars for structure (suitable for 15M)
+recentHigh = ta.highest(high[1], lookbackStructure)
+recentLow = ta.lowest(low[1], lookbackStructure)
 prevRecentHigh = ta.highest(high[2], lookbackStructure)
 prevRecentLow = ta.lowest(low[2], lookbackStructure)
 
@@ -760,18 +740,17 @@ isValidBearishSignal() =>
 isValidBullish = isValidBullishSignal()
 isValidBearish = isValidBearishSignal()
 
-// ======================== COMPREHENSIVE FILTER CONDITIONS (BEFORE ENTRY CALCULATION) ========================
+// ======================== COMPREHENSIVE FILTER CONDITIONS (DECLARED EARLY) ========================
 // RSI Entry Filter Conditions
 rsiEntryFilterBuy = not useRsiEntryFilter or rsiValue < rsiEntryFilterBuyMax
 rsiEntryFilterSell = not useRsiEntryFilter or rsiValue > rsiEntryFilterSellMin
 
 // Loss protection checks (use close price as temporary entry for checking BEFORE entry calculation)
-// Pine Script requires function calls on each bar for consistency - must call checkLossProtection on every bar
 lossProtectionBuyTemp = checkLossProtection(true, close)
 lossProtectionSellTemp = checkLossProtection(false, close)
 
 // Comprehensive Buy Filter Condition (ALL FILTERS - properly integrated with enable/disable)
-// Each filter only applies when its corresponding input is enabled
+// STANDARDIZED to match XAUUSD and USDJPY clean market structure
 allBuyFiltersPass = 
   barConfirmation and
   not inTrade and 
@@ -787,12 +766,12 @@ allBuyFiltersPass =
   volumeIncreaseCondition and        // Volume confirmation (can disable in settings)
   volatilityCondition and            // Volatility filter (can disable in settings)
   consecutiveBarsBuy and             // Consecutive bullish bars required
-  inAllowedSession and              // London/NY session filter
-  notInHKBlockPeriod and            // Block 03:30-05:00 HKT (low liquidity)
-  isValidBullish                   // Price action strength confirmation
+  inAllowedSession and               // Session filter (London/NY only)
+  notInHKBlockPeriod and             // Block 03:30-05:00 HKT (low liquidity)
+  isValidBullish                    // Price action strength confirmation
 
 // Comprehensive Sell Filter Condition (ALL FILTERS - properly integrated with enable/disable)
-// Each filter only applies when its corresponding input is enabled
+// STANDARDIZED to match XAUUSD and USDJPY clean market structure
 allSellFiltersPass = 
   barConfirmation and
   not inTrade and 
@@ -808,9 +787,9 @@ allSellFiltersPass =
   volumeIncreaseCondition and        // Volume confirmation (can disable in settings)
   volatilityCondition and            // Volatility filter (can disable in settings)
   consecutiveBarsSell and            // Consecutive bearish bars required
-  inAllowedSession and              // London/NY session filter
-  notInHKBlockPeriod and            // Block 03:30-05:00 HKT (low liquidity)
-  isValidBearish                   // Price action strength confirmation
+  inAllowedSession and               // Session filter (London/NY only)
+  notInHKBlockPeriod and             // Block 03:30-05:00 HKT (low liquidity)
+  isValidBearish                     // Price action strength confirmation
 
 // ======================== ANTI-REPAINT: Confirm-on-Next-Bar Pattern ========================
 // Bar N: Store pending signal when conditions pass (bar closed)
@@ -831,8 +810,8 @@ if ((waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation) a
     pendingBuyEntry := close
     pendingBuyStop := currentWaveLow
     pendingBuyOriginalStop := currentWaveLow
-    targetRiskDistance = math.max(close - currentWaveLow, syminfo.mintick * 3)
-    pendingBuyTarget := close + targetRiskDistance * rrRatio
+    targetRiskDistance = math.max(close - currentWaveLow, syminfo.mintick * 5)
+    pendingBuyTarget := close + (targetRiskDistance * rrRatio)
     pendingBuySignal := true
     lastPivotHigh := na
 else
@@ -842,8 +821,8 @@ if ((waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation) a
     pendingSellEntry := close
     pendingSellStop := currentWaveHigh
     pendingSellOriginalStop := currentWaveHigh
-    targetRiskDistance = math.max(currentWaveHigh - close, syminfo.mintick * 3)
-    pendingSellTarget := close - targetRiskDistance * rrRatio
+    targetRiskDistance = math.max(currentWaveHigh - close, syminfo.mintick * 5)
+    pendingSellTarget := close - (targetRiskDistance * rrRatio)
     pendingSellSignal := true
     lastPivotLow := na
 else
@@ -853,79 +832,91 @@ else
 if pendingBuySignal[1]
     buy_entry := pendingBuyEntry[1]
     buy_stop := pendingBuyStop[1]
-    buy_original_stop := pendingBuyOriginalStop[1]
     buy_target := pendingBuyTarget[1]
+    signal_buy_entry := pendingBuyEntry[1]
+    signal_buy_target := pendingBuyTarget[1]
+    signal_buy_stop := pendingBuyStop[1]
+    signal_buy_original_stop := pendingBuyOriginalStop[1]
 else
     buy_entry := na
     buy_target := na
     buy_stop := na
+    signal_buy_entry := na
+    signal_buy_target := na
+    signal_buy_stop := na
+    signal_buy_original_stop := na
 
 if pendingSellSignal[1]
     sell_entry := pendingSellEntry[1]
     sell_stop := pendingSellStop[1]
-    sell_original_stop := pendingSellOriginalStop[1]
     sell_target := pendingSellTarget[1]
+    signal_sell_entry := pendingSellEntry[1]
+    signal_sell_target := pendingSellTarget[1]
+    signal_sell_stop := pendingSellStop[1]
+    signal_sell_original_stop := pendingSellOriginalStop[1]
 else
     sell_entry := na
     sell_target := na
     sell_stop := na
+    signal_sell_entry := na
+    signal_sell_target := na
+    signal_sell_stop := na
+    signal_sell_original_stop := na
+
+// ──────────────────── Consolidation Detection ────────────────────
+consolidationHigh = ta.highest(high, consolidationPeriod)
+consolidationLow = ta.lowest(low, consolidationPeriod)
+consolidationRange = consolidationHigh - consolidationLow
+consolidationATR = atr_value * consolidationThreshold
+
+// CRITICAL FIX: Use market structure breakouts, not ATR breakouts!
+// Market structure breakouts COME FROM consolidation, so allow them
+isConsolidating = not na(consolidationATR) and consolidationRange < consolidationATR and not marketStructureBuyBreakout and not marketStructureSellBreakout
+
+// ──────────────────── Enhanced Range Market Detection ────────────────────
+// Enhanced Range Detection
+rangeHigh = ta.highest(high, rangeDetectionPeriod)
+rangeLow = ta.lowest(low, rangeDetectionPeriod)
+rangeSize = rangeHigh - rangeLow
+rangeSizeATR = rangeSize / atr_value
+
+isWeakTrend = useADXFilter and adx < adxThreshold
+isTightRange = rangeSizeATR < rangeThreshold
+
+// ──────────────────── Advanced Breakout Detection (moved BEFORE range check) ────────────────────
+// ──────────────────── Additional Calculations (AFTER DECLARATIONS) ────────────────────
+// Legacy ATR breakout (keeping for reference)
+highestHigh = ta.highest(high[1], lookbackPeriod)
+lowestLow = ta.lowest(low[1], lookbackPeriod)
+minBreakoutAmount = atr_value * minBreakoutSize / 100
+significantBreakoutUp = (high - highestHigh) >= minBreakoutAmount
+significantBreakoutDown = (low - lowestLow) <= -minBreakoutAmount
+
+// Range Market Detection
+isRangeMarket = useRangeFilter and (isWeakTrend or isTightRange or isHTFRanging) and not marketStructureBuyBreakout and not marketStructureSellBreakout
+
+validAtrCondition = not na(atr_value) and atr_value >= minAtrFilter
 
 // Loss protection checks (for signal display - uses actual entry if available)
-// Pine Script requires function calls on each bar for consistency - must call checkLossProtection on every bar
-lossProtectionBuy = not na(buy_entry) ? checkLossProtection(true, buy_entry) : lossProtectionBuyTemp
-lossProtectionSell = not na(sell_entry) ? checkLossProtection(false, sell_entry) : lossProtectionSellTemp
+lossProtectionBuy = not na(signal_buy_entry) ? checkLossProtection(true, signal_buy_entry) : lossProtectionBuyTemp
+lossProtectionSell = not na(signal_sell_entry) ? checkLossProtection(false, signal_sell_entry) : lossProtectionSellTemp
 
 // Unified signal conditions - Use confirmed pending (anti-repaint: signal from previous bar)
-showBuySignal = pendingBuySignal[1] and not na(buy_entry) and not na(buy_target) and not inTrade
+showBuySignal = pendingBuySignal[1] and not na(signal_buy_entry) and not na(signal_buy_target) and not inTrade
 
-showSellSignal = pendingSellSignal[1] and not na(sell_entry) and not na(sell_target) and not inTrade
+showSellSignal = pendingSellSignal[1] and not na(signal_sell_entry) and not na(signal_sell_target) and not inTrade
 
-// ======================== FIXED ALERT GENERATION ========================
-// Helper function to format price with 3 decimal places for alerts (XAUUSD)
-formatPriceForAlert(price) =>
-    baseString = str.tostring(price, "#.###")
-    dotPos = str.pos(baseString, ".")
-    if dotPos == -1
-        baseString + ".000"
-    else
-        decimalPart = str.substring(baseString, dotPos + 1)
-        decimalLength = str.length(decimalPart)
-        if decimalLength == 1
-            baseString + "00"
-        else if decimalLength == 2
-            baseString + "0"
-        else
-            baseString
+// ======================== Signal display tracking ========================
+var int displayedSignals = 0
 
 // ──────────────────── BACKWARD 10-TRADE BLOCK WIN RATES (111–120, 101–110, ..., 1–10) ────────────────────
-var array<bool> validTradeResults = array.new_bool()
-var int totalTrades = 0
-var int totalWins = 0
-var int totalLosses = 0
-var int currentWinStreak = 0
-var int currentLossStreak = 0
-var int maxWinStreak = 0
-var int maxWinStreakTime = na
-var int maxLossStreak = 0
-var int maxLossStreakTime = na
-var int lastTradeCloseBar = 0
-var string lastTradeID = ""
-var int firstTradeTime = na
-
-// Separate counters for Buy/Sell win rates
-var int totalBuyTrades = 0
-var int totalSellTrades = 0
-var int buyWins = 0
-var int sellWins = 0
-
-// Track valid trades (excluding warmup)
-var int validTradesCount = 0
-
 // Function: Get win rate for a 10-trade block ending at 'blockEndSize' from the end
+// This calculates backwards from the most recent trades, so it works even with fewer than 120 trades
+// Note: recentTradeResults already contains only valid trades (after warmup), so we don't need warmupPeriod check
 getBackwardBlockWinRate(blockEndSize) =>
-    size = array.size(validTradeResults)
-    if size <= warmupPeriod
-        na
+    size = array.size(recentTradeResults)
+    if size < 10
+        na  // Need at least 10 trades for a block
     else
         blockNumber = blockEndSize / 10  // 1 to 12
         startTrade = size - blockNumber * 10
@@ -936,12 +927,12 @@ getBackwardBlockWinRate(blockEndSize) =>
         else
             wins = 0
             for i = startTrade to endTrade
-                if array.get(validTradeResults, i)
+                if array.get(recentTradeResults, i)
                     wins += 1
             wins * 10  // Ensures 0%, 10%, ..., 100%
 
 // Calculate all 12 backward 10-trade blocks
-block10  = getBackwardBlockWinRate(10)   // Most recent 10: trades 111–120
+block10  = getBackwardBlockWinRate(10)   // Most recent 10: trades 111–120 (or most recent if < 120 trades)
 block20  = getBackwardBlockWinRate(20)   // 101–110
 block30  = getBackwardBlockWinRate(30)   // 91–100
 block40  = getBackwardBlockWinRate(40)   // 81–90
@@ -954,49 +945,75 @@ block100 = getBackwardBlockWinRate(100)  // 21–30
 block110 = getBackwardBlockWinRate(110)  // 11–20
 block120 = getBackwardBlockWinRate(120)  // Oldest 10: 1–10
 
+// Map to old variable names for compatibility with dashboard
+recent10WinRate = block10
+recent20WinRate = block20
+recent30WinRate = block30
+recent40WinRate = block40
+recent50WinRate = block50
+recent60WinRate = block60
+recent70WinRate = block70
+recent80WinRate = block80
+recent90WinRate = block90
+recent100WinRate = block100
+recent110WinRate = block110
+recent120WinRate = block120
+
+// Also keep cumulative calculations for reference
+calculateCumulativeWinRate(period) =>
+    arraySize = array.size(recentTradeResults)
+    if arraySize >= period
+        wins = 0
+        total = 0
+        for i = math.max(0, arraySize - period) to arraySize - 1
+            if array.get(recentTradeResults, i)
+                wins += 1
+            total += 1
+        total > 0 ? (wins / total) * 100 : 0
+    else
+        0
+
+cumulative10WinRate = calculateCumulativeWinRate(10)
+cumulative20WinRate = calculateCumulativeWinRate(20)
+cumulative30WinRate = calculateCumulativeWinRate(30)
+
 // Risk percentage is passed to MT5 EA via alert (position sizing handled by EA, not Pine Script)
 // accountSize and maxRiskAmount removed - no adaptive position sizing in Pine Script
 
 // ──────────────────── Trade Execution Logic ────────────────────
 if inTrade
+    // Use stored signal values for consistent exit conditions
     targetHit = isBuyTrade ? (high >= currentTarget) : (low <= currentTarget)
     stopHit = isBuyTrade ? (low <= currentStop) : (high >= currentStop)
     durationExpired = (bar_index - entryBarIndex) >= maxTradeDuration
     
-    // Turtle opposite breakout exit
-    turtleOppositeExit = false
-    if useOppositeBreakoutExit
-        if isBuyTrade
-            turtleOppositeExit := turtleSellBreakout
-        else
-            turtleOppositeExit := turtleBuyBreakout
-    
-    // Determine the actual exit reason based on priority
-    // Priority: Stop > Target > Turtle Exit > Duration
-    // NOTE: Turtle and Duration exits are disabled by default for consistent 1:1 RR
+    // Determine exit reason - Priority: Stop > Target > Duration (RSI Exit removed for consistent RR)
     if stopHit
         exitReason := "STOP"
     else if targetHit
         exitReason := "TARGET"
-    else if turtleOppositeExit
-        exitReason := "TURTLE"
     else if durationExpired
         exitReason := "EXPIRED"
     
-    if targetHit or stopHit or turtleOppositeExit or durationExpired
-        exitPrice := stopHit ? currentStop : targetHit ? currentTarget : turtleOppositeExit ? close : close
+    // When any condition is met, close the trade
+    if targetHit or stopHit or durationExpired
+        // Record actual exit price
+        exitPrice := targetHit ? currentTarget : stopHit ? currentStop : close
+        
+        // Close position
         strategy.close_all(comment=exitReason)
         
         tradeCompleted := true
         inTrade := false
+        
         // TARGET is always a win, STOP is always a loss
-        // TURTLE/EXPIRED: Check if exit price resulted in profit
+        // EXPIRED: Check if exit price resulted in profit
         if exitReason == "TARGET"
             tradeSuccess := true  // Target hit = always win
         else if exitReason == "STOP"
             tradeSuccess := false  // Stop hit = always loss
         else
-            // For TURTLE or EXPIRED exits: Check if exit price is profitable
+            // For EXPIRED exits: Check if exit price is profitable
             // BUY trade: exitPrice > entry = win, exitPrice < entry = loss
             // SELL trade: exitPrice < entry = win, exitPrice > entry = loss
             if isBuyTrade
@@ -1004,42 +1021,57 @@ if inTrade
             else
                 tradeSuccess := exitPrice < currentEntry
         
+        // Activate cooldown if it was a loss
+        if not tradeSuccess and use_cooldown
+            inCooldown := true
+            cooldownCounter := 0
+        
+        // Ensure we only count once
         if not array.includes(processedTrades, currentTradeId)
             array.push(processedTrades, currentTradeId)
-            totalTrades += 1
+            totalTrades := totalTrades + 1
             
             if totalTrades == 1
                 firstTradeTime := time
-            
+                
             // Track buy/sell trades for ALL trades (not affected by warmup)
             if isBuyTrade
-                totalBuyTrades += 1
+                totalBuyTrades := totalBuyTrades + 1
                 if tradeSuccess
-                    buyWins += 1
+                    buyWins := buyWins + 1
             else
-                totalSellTrades += 1
+                totalSellTrades := totalSellTrades + 1
                 if tradeSuccess
-                    sellWins += 1
-            
-            // Win/loss statistics only after warmup period
-            if totalTrades > warmupPeriod
-                validTradesCount += 1
-                array.push(validTradeResults, tradeSuccess)
+                    sellWins := sellWins + 1
                 
+            // Handle warmup period trades
+            if totalTrades <= warmupPeriod
                 if tradeSuccess
-                    totalWins += 1
-                    currentWinStreak += 1
+                    warmupWins := warmupWins + 1
+            else
+                if tradeSuccess
+                    totalWins := totalWins + 1
+                else
+                    totalLosses := totalLosses + 1
+                
+                // Update win/loss streaks
+                if tradeSuccess
+                    currentWinStreak := currentWinStreak + 1
                     currentLossStreak := 0
                     if currentWinStreak > maxWinStreak
                         maxWinStreak := currentWinStreak
                         maxWinStreakTime := time
                 else
-                    totalLosses += 1
-                    currentLossStreak += 1
+                    currentLossStreak := currentLossStreak + 1
                     currentWinStreak := 0
                     if currentLossStreak > maxLossStreak
                         maxLossStreak := currentLossStreak
                         maxLossStreakTime := time
+                
+                // Record recent trade results
+                array.push(recentTradeResults, tradeSuccess)
+                if array.size(recentTradeResults) > recentWindowSize
+                    array.shift(recentTradeResults)
                 
                 // ======================== Loss Protection: Record Losses & Wins ========================
                 // Record loss for protection system (only after warmup period)
@@ -1068,9 +1100,11 @@ if inTrade
         lastTradeCloseBar := bar_index
         lastTradeID := currentTradeId
         
+        // Show trade result labels with exit reason
         if show_trade_results
             pointOffset = result_label_offset * syminfo.mintick
             labelText = tradeSuccess ? "WIN\n" + exitReason : "LOSS\n" + exitReason
+            
             label.new(bar_index, 
                      isBuyTrade ? (tradeSuccess ? high + pointOffset : low - pointOffset) : 
                                   (tradeSuccess ? low - pointOffset : high + pointOffset), 
@@ -1090,17 +1124,22 @@ if inTrade
 // Anti-repaint: Fire when confirmed pending signal (bar N+1) - no barConfirmation needed, signal already confirmed
 if not inTrade
     if showBuySignal
-        tradeIdCounter += 1
+        tradeIdCounter := tradeIdCounter + 1
         timeStamp = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss'Z'}", time)
         currentTradeId := syminfo.ticker + "_T" + str.tostring(tradeIdCounter) + "-" + timeStamp
         
+        // Use stored signal values for execution
+        actualEntry = signal_buy_entry
+        actualTarget = signal_buy_target
+        actualStop = signal_buy_stop
+        
         // Calculate RR based on original stop (used for target calculation), not Chandelier stop
         // This ensures RR matches the configured ratio
-        stopForRR = not na(buy_original_stop) ? buy_original_stop : buy_stop
-        actualRR = calculateRR(true, buy_entry, buy_target, stopForRR)
-        formattedEntry = formatPriceForAlert(buy_entry)
-        formattedTarget = str.tostring(buy_target, "#.###")
-        formattedStop = str.tostring(buy_stop, "#.###")
+        stopForRR = not na(signal_buy_original_stop) ? signal_buy_original_stop : actualStop
+        actualRR = calculateRR(true, actualEntry, actualTarget, stopForRR)
+        formattedEntry = str.tostring(actualEntry, "#.#####")
+        formattedTarget = str.tostring(actualTarget, "#.#####")
+        formattedStop = str.tostring(actualStop, "#.#####")
         currentTimeframe = timeframe.period
         riskPercentage = str.tostring(maxRiskPercent, "#.#") + "%"
         
@@ -1108,9 +1147,9 @@ if not inTrade
         
         inTrade := true
         tradeCompleted := false
-        currentEntry := buy_entry
-        currentTarget := buy_target
-        currentStop := buy_stop
+        currentEntry := actualEntry
+        currentTarget := actualTarget
+        currentStop := actualStop
         isBuyTrade := true
         entryBarIndex := bar_index
         lastTradeBar := bar_index
@@ -1120,20 +1159,26 @@ if not inTrade
         strategy.entry("Buy", strategy.long)
         strategy.exit("Exit Buy", "Buy", stop=currentStop, limit=currentTarget, comment="Exit Buy")
         
+        displayedSignals := displayedSignals + 1
         alert(alertMsg)
     
     if showSellSignal
-        tradeIdCounter += 1
+        tradeIdCounter := tradeIdCounter + 1
         timeStamp = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss'Z'}", time)
         currentTradeId := syminfo.ticker + "_T" + str.tostring(tradeIdCounter) + "-" + timeStamp
         
+        // Use stored signal values for execution
+        actualEntry = signal_sell_entry
+        actualTarget = signal_sell_target
+        actualStop = signal_sell_stop
+        
         // Calculate RR based on original stop (used for target calculation), not Chandelier stop
         // This ensures RR matches the configured ratio
-        stopForRR = not na(sell_original_stop) ? sell_original_stop : sell_stop
-        actualRR = calculateRR(false, sell_entry, sell_target, stopForRR)
-        formattedEntry = formatPriceForAlert(sell_entry)
-        formattedTarget = str.tostring(sell_target, "#.###")
-        formattedStop = str.tostring(sell_stop, "#.###")
+        stopForRR = not na(signal_sell_original_stop) ? signal_sell_original_stop : actualStop
+        actualRR = calculateRR(false, actualEntry, actualTarget, stopForRR)
+        formattedEntry = str.tostring(actualEntry, "#.#####")
+        formattedTarget = str.tostring(actualTarget, "#.#####")
+        formattedStop = str.tostring(actualStop, "#.#####")
         currentTimeframe = timeframe.period
         riskPercentage = str.tostring(maxRiskPercent, "#.#") + "%"
         
@@ -1141,9 +1186,9 @@ if not inTrade
         
         inTrade := true
         tradeCompleted := false
-        currentEntry := sell_entry
-        currentTarget := sell_target
-        currentStop := sell_stop
+        currentEntry := actualEntry
+        currentTarget := actualTarget
+        currentStop := actualStop
         isBuyTrade := false
         entryBarIndex := bar_index
         lastTradeBar := bar_index
@@ -1153,6 +1198,7 @@ if not inTrade
         strategy.entry("Sell", strategy.short)
         strategy.exit("Exit Sell", "Sell", stop=currentStop, limit=currentTarget, comment="Exit Sell")
         
+        displayedSignals := displayedSignals + 1
         alert(alertMsg)
 
 // ──────────────────────── Plotting & Visualization ────────────────────────
@@ -1160,42 +1206,17 @@ p1 = plot(smoothed_value, "VIDYA Band", color=trend_color, linewidth=band_width)
 p2 = plot(hl2, display=display.none)
 fill(p1, p2, color.new(trend_color, use_shadow ? 80 : 100))
 
-// Background highlighting for signal bars (helps visualize when signals trigger)
-bgcolor(showBuySignal ? color.new(#0000ff, 95) : na, title="Buy Signal Background")
-bgcolor(showSellSignal ? color.new(#800080, 95) : na, title="Sell Signal Background")
-
-// ======================== FIXED: Visual signals use same conditions as alerts ========================
-// Plot signals with Turtle confirmation indicator
-signalColorBuy = useTurtleConfirmation and turtleBuyBreakout ? color.new(#00ff00, 0) : color.new(#0000ff, 0)
-signalColorSell = useTurtleConfirmation and turtleSellBreakout ? color.new(#ff0000, 0) : color.new(#800080, 0)
-
-// Plot visual signals - barConfirmation already included in showBuySignal/showSellSignal
+// ======================== FIXED: Visual signals use same conditions as alerts (anti-repaint) ========================
 plotshape(showBuySignal, title="Buy Signal", location=location.belowbar, 
-         color=signalColorBuy, style=shape.triangleup, size=size.normal)
+         color=color.new(#0000ff, 0), style=shape.triangleup, size=size.normal)
 plotshape(showSellSignal, title="Sell Signal", location=location.abovebar, 
-         color=signalColorSell, style=shape.triangledown, size=size.normal)
-
-// Debug markers - show when conditions are being evaluated (optional for debugging)
-plotchar(showBuySignal, title="Buy Signal Debug", char="B", location=location.belowbar, color=color.new(color.blue, 0), size=size.tiny)
-plotchar(showSellSignal, title="Sell Signal Debug", char="S", location=location.abovebar, color=color.new(color.purple, 0), size=size.tiny)
-
-// Plot Donchian Channels
-plot(showDonchianChannels ? donchianS1High : na, "Donchian S1 High", color=color.new(color.blue, 70), linewidth=1)
-plot(showDonchianChannels ? donchianS1Low : na, "Donchian S1 Low", color=color.new(color.blue, 70), linewidth=1)
-plot(showDonchianChannels ? donchianS2High : na, "Donchian S2 High", color=color.new(color.orange, 70), linewidth=2)
-plot(showDonchianChannels ? donchianS2Low : na, "Donchian S2 Low", color=color.new(color.orange, 70), linewidth=2)
+         color=color.new(#800080, 0), style=shape.triangledown, size=size.normal)
 
 // RSI is calculated but not plotted on price chart (would distort scale)
 // RSI values are used internally for exit logic only
 
-// Plot Turtle breakout markers (when not used as confirmation)
-plotshape(turtleBuyBreakout and not useTurtleConfirmation and not showBuySignal, title="Turtle Buy", 
-         location=location.belowbar, color=color.new(color.orange, 50), style=shape.circle, size=size.tiny)
-plotshape(turtleSellBreakout and not useTurtleConfirmation and not showSellSignal, title="Turtle Sell", 
-         location=location.abovebar, color=color.new(color.orange, 50), style=shape.circle, size=size.tiny)
-
 formatPrice(price) =>
-    str.tostring(price, "#.###")
+    str.tostring(price, "#.#####")
 
 formatDate(t) =>
     not na(t) ? str.format("{0,date,yyyy-MM-dd HH:mm}", t) : "N/A"
@@ -1203,36 +1224,37 @@ formatDate(t) =>
 formatMoney(value) =>
     value >= 0 ? "$" + str.tostring(value, "#,##0.00") : "-$" + str.tostring(math.abs(value), "#,##0.00")
 
-// Create labels when signals are generated (use non-na values to ensure display)
 if show_labels
-    if showBuySignal and not na(buy_entry) and not na(buy_target) and not na(buy_stop)
+    if showBuySignal
         // Use original stop for RR calculation to match configured ratio
-        stopForRRDisplay = not na(buy_original_stop) ? buy_original_stop : buy_stop
-        rrActual = calculateRR(true, buy_entry, buy_target, stopForRRDisplay)
-        tradeIdForLabel = not na(currentTradeId) ? currentTradeId : syminfo.ticker + "_T" + str.tostring(tradeIdCounter + 1)
-        buy_text = "BUY\n" +
-                  "Entry: " + formatPrice(buy_entry) + "\n" +
-                  "Target: " + formatPrice(buy_target) + "\n" +
-                  "Stop: " + formatPrice(buy_stop) + "\n" +
+        stopForRRDisplay = not na(signal_buy_original_stop) ? signal_buy_original_stop : signal_buy_stop
+        rrActual = calculateRR(true, signal_buy_entry, signal_buy_target, stopForRRDisplay)
+    
+        buy_text = "▲ BUY\n" +
+                  "Entry: " + formatPrice(signal_buy_entry) + "\n" +
+                  "Target: " + formatPrice(signal_buy_target) + "\n" +
+                  "Stop: " + formatPrice(signal_buy_stop) + "\n" +
                   "RR: " + str.tostring(rrActual, "#.##") + ":1\n" +
-                  "ID: " + tradeIdForLabel + "\n" +
+                  "ID: " + currentTradeId + "\n" +
                   "Time: " + str.format("{0,date,MM-dd HH:mm}", time)
+        
         label.new(bar_index, low, buy_text, style=label.style_label_up, 
              color=color.new(#0000ff, 90), textcolor=color.white, size=size.normal,
              textalign=text.align_center)
     
-    if showSellSignal and not na(sell_entry) and not na(sell_target) and not na(sell_stop)
+    if showSellSignal
         // Use original stop for RR calculation to match configured ratio
-        stopForRRDisplay = not na(sell_original_stop) ? sell_original_stop : sell_stop
-        rrActual = calculateRR(false, sell_entry, sell_target, stopForRRDisplay)
-        tradeIdForLabel = not na(currentTradeId) ? currentTradeId : syminfo.ticker + "_T" + str.tostring(tradeIdCounter + 1)
-        sell_text = "SELL\n" +
-                   "Entry: " + formatPrice(sell_entry) + "\n" +
-                   "Target: " + formatPrice(sell_target) + "\n" +
-                   "Stop: " + formatPrice(sell_stop) + "\n" +
+        stopForRRDisplay = not na(signal_sell_original_stop) ? signal_sell_original_stop : signal_sell_stop
+        rrActual = calculateRR(false, signal_sell_entry, signal_sell_target, stopForRRDisplay)
+        
+        sell_text = "▼ SELL\n" +
+                   "Entry: " + formatPrice(signal_sell_entry) + "\n" +
+                   "Target: " + formatPrice(signal_sell_target) + "\n" +
+                   "Stop: " + formatPrice(signal_sell_stop) + "\n" +
                    "RR: " + str.tostring(rrActual, "#.##") + ":1\n" +
-                   "ID: " + tradeIdForLabel + "\n" +
+                   "ID: " + currentTradeId + "\n" +
                    "Time: " + str.format("{0,date,MM-dd HH:mm}", time)
+        
         label.new(bar_index, high, sell_text, style=label.style_label_down, 
              color=color.new(#800080, 90), textcolor=color.white, size=size.normal,
              textalign=text.align_center)
@@ -1242,18 +1264,29 @@ var line entryLine = line.new(bar_index, close, bar_index, close, extend=extend.
 var line targetLine = line.new(bar_index, close, bar_index, close, extend=extend.none)
 var line stopLine = line.new(bar_index, close, bar_index, close, extend=extend.none)
 
-if show_trade_details and not na(currentEntry) and bar_index - entryBarIndex <= lines_duration
+// FIXED: Use stored signal values for consistent plotting
+currentPlotEntry = inTrade ? currentEntry : na
+currentPlotTarget = inTrade ? currentTarget : na
+currentPlotStop = inTrade ? currentStop : na
+
+if show_trade_details and not na(currentPlotEntry) and bar_index - entryBarIndex <= lines_duration
     entryColor = isBuyTrade ? #0000ff : #800080
+    
     line.delete(entryLine)
-    entryLine := line.new(entryBarIndex, currentEntry, bar_index, currentEntry,
+    entryLine := line.new(
+         entryBarIndex, currentPlotEntry, bar_index, currentPlotEntry,
          xloc=xloc.bar_index, extend=extend.right,
          color=color.new(entryColor, lines_transparency), width=2, style=line.style_solid)
+    
     line.delete(targetLine)
-    targetLine := line.new(entryBarIndex, currentTarget, bar_index, currentTarget,
+    targetLine := line.new(
+         entryBarIndex, currentPlotTarget, bar_index, currentPlotTarget,
          xloc=xloc.bar_index, extend=extend.right,
          color=color.new(#00ff00, lines_transparency), width=2, style=line.style_dashed)
+    
     line.delete(stopLine)
-    stopLine := line.new(entryBarIndex, currentStop, bar_index, currentStop,
+    stopLine := line.new(
+         entryBarIndex, currentPlotStop, bar_index, currentPlotStop,
          xloc=xloc.bar_index, extend=extend.right,
          color=color.new(#ff0000, lines_transparency), width=2, style=line.style_dashed)
 else
@@ -1261,114 +1294,160 @@ else
     line.delete(targetLine)
     line.delete(stopLine)
 
-// ──────────────────────── Enhanced Status Dashboard (Backward Blocks) ────────────────────────
-overallWinRate = validTradesCount > 0 ? (totalWins * 100.0) / validTradesCount : 0
-buyWinRate = totalBuyTrades > 0 ? (buyWins * 100.0) / totalBuyTrades : 0
-sellWinRate = totalSellTrades > 0 ? (sellWins * 100.0) / totalSellTrades : 0
+// ──────────────────────── ENHANCED v5 DASHBOARD ────────────────────────
+// FIXED: Use actual wins + losses count instead of subtracting warmup period
+// This ensures accurate win rate calculation even if some trades are skipped
+totalValidTrades = totalWins + totalLosses
+overallWinRate = totalValidTrades > 0 ? (totalWins * 100.0) / totalValidTrades : 0
 
+// Calculate buy/sell win rates
+buyWinRate = totalBuyTrades > 0 ? (buyWins / totalBuyTrades) * 100 : 0
+sellWinRate = totalSellTrades > 0 ? (sellWins / totalSellTrades) * 100 : 0
+
+// Helper functions for win rate formatting and coloring
 getWinRateColor(winRate) =>
     na(winRate) ? #808080 : winRate >= 50 ? #00ff00 : #ff0000
 
 formatWinRate(winRate) =>
     na(winRate) ? "N/A" : str.tostring(winRate) + "%"
 
-var table statusTable = table.new(position.top_right, 2, 31, border_width=1, bgcolor=color.new(#000000, 80))
+// Create enhanced dashboard table
+var table statusTable = table.new(position.top_right, 2, 36, border_width=1, bgcolor=color.new(#000000, 80))
 
-if barstate.isconfirmed
+if barstate.isconfirmed and show_v5_dashboard
     table.clear(statusTable, 0, 0)
     
-    trendStatus = is_trend_up ? "UP" : "DOWN"
+    trendStatus = is_trend_up ? "UP ▲" : "DOWN ▼"
     volumeStatus = is_strong_buy ? "BULL" : is_strong_sell ? "BEAR" : "NEU"
-    signalStatus = showBuySignal ? "BUY" : showSellSignal ? "SELL" : "NONE"
-    signalColor = showBuySignal ? #0000ff : showSellSignal ? #800080 : #808080
+    regimeStatus = is_trending_market ? "TRENDING" : "RANGING"
+    
+    // Session status
+    sessionStatus = "OFF HOURS"
+    sessionColor = #ff0000
+    if not useSessionFilter
+        sessionStatus := "FILTER OFF"
+        sessionColor := #808080
+    else if inLondonSession and inNewYorkSession
+        sessionStatus := "LONDON+NY"
+        sessionColor := #00ff00
+    else if inLondonSession
+        sessionStatus := "LONDON"
+        sessionColor := #008000
+    else if inNewYorkSession
+        sessionStatus := "NEW YORK"
+        sessionColor := #0000ff
+    
+    signalStatus = "NONE"
+    signalColor = #808080
+    if showBuySignal
+        signalStatus := "BUY"
+        signalColor := #0000ff
+    else if showSellSignal
+        signalStatus := "SELL"
+        signalColor := #800080
+    
     currentTradeStatus = inTrade ? (isBuyTrade ? "BUY" : "SELL") + " ACTIVE" : "NO TRADE"
     tradeStatusColor = inTrade ? (isBuyTrade ? #0000ff : #800080) : #808080
-    tradeResultStatus = tradeCompleted and totalTrades > 0 ? (tradeSuccess ? "WIN " + exitReason : "LOSS " + exitReason) : "N/A"
-    tradeResultColor = tradeCompleted and totalTrades > 0 ? (tradeSuccess ? #00ff00 : #ff0000) : #808080
+    
+    tradeResultStatus = "N/A"
+    tradeResultColor = #808080
+    if tradeCompleted and totalTrades > 0
+        if tradeSuccess
+            tradeResultStatus := "WIN " + exitReason
+            tradeResultColor := #00ff00
+        else
+            tradeResultStatus := "LOSS " + exitReason
+            tradeResultColor := #ff0000
+    
     repaintingStatus = waitForConfirmation ? "ON" : "OFF"
-    rangeMarketStatus = isRangeMarket ? "RANGE" : "TREND"
-    rangeColor = isRangeMarket ? #ff6b00 : #00ff00
+    cooldownStatus = inCooldown ? "ACTIVE (" + str.tostring(cooldown_bars - cooldownCounter) + ")" : "INACTIVE"
+    confirmationStatus = "BULL:" + str.tostring(bullishConfirmationBars) + " BEAR:" + str.tostring(bearishConfirmationBars)
+    
+    // Apply color logic to each win rate
+    color120 = getWinRateColor(recent120WinRate)
+    color110 = getWinRateColor(recent110WinRate)
+    color100 = getWinRateColor(recent100WinRate)
+    color90 = getWinRateColor(recent90WinRate)
+    color80 = getWinRateColor(recent80WinRate)
+    color70 = getWinRateColor(recent70WinRate)
+    color60 = getWinRateColor(recent60WinRate)
+    color50 = getWinRateColor(recent50WinRate)
+    color40 = getWinRateColor(recent40WinRate)
+    color30 = getWinRateColor(recent30WinRate)
+    color20 = getWinRateColor(recent20WinRate)
+    color10 = getWinRateColor(recent10WinRate)
 
-    // Backward block colors
-    color10  = getWinRateColor(block10)
-    color20  = getWinRateColor(block20)
-    color30  = getWinRateColor(block30)
-    color40  = getWinRateColor(block40)
-    color50  = getWinRateColor(block50)
-    color60  = getWinRateColor(block60)
-    color70  = getWinRateColor(block70)
-    color80  = getWinRateColor(block80)
-    color90  = getWinRateColor(block90)
-    color100 = getWinRateColor(block100)
-    color110 = getWinRateColor(block110)
-    color120 = getWinRateColor(block120)
+    // Generate text for each period (reversed order)
+    recent120Text = formatWinRate(recent120WinRate)
+    recent110Text = formatWinRate(recent110WinRate)
+    recent100Text = formatWinRate(recent100WinRate)
+    recent90Text = formatWinRate(recent90WinRate)
+    recent80Text = formatWinRate(recent80WinRate)
+    recent70Text = formatWinRate(recent70WinRate)
+    recent60Text = formatWinRate(recent60WinRate)
+    recent50Text = formatWinRate(recent50WinRate)
+    recent40Text = formatWinRate(recent40WinRate)
+    recent30Text = formatWinRate(recent30WinRate)
+    recent20Text = formatWinRate(recent20WinRate)
+    recent10Text = formatWinRate(recent10WinRate)
 
+    // Enhanced Dashboard layout
     rowIndex = 0
     
-    table.cell(statusTable, 0, rowIndex, "XAUUSD VIDYA Strategy [SYNC FIXED]", text_color=color.white, bgcolor=color.new(#2b3139, 90), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, "", bgcolor=color.new(#2b3139, 90))
+    // Header
+    table.cell(statusTable, 0, rowIndex, "GBPUSD VIDYA Strategy v5", text_color=color.white, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, "ANTI-REPAINT ✓", text_color=#00ff00, bgcolor=color.new(#2b3139, 90), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Trend | Volume | Signal", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, trendStatus + " | " + volumeStatus + " | " + signalStatus, text_color=signalColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    // Market status (enhanced)
+    table.cell(statusTable, 0, rowIndex, "Trend | Volume | Regime", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, trendStatus + " | " + volumeStatus + " | " + regimeStatus, text_color=signalColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Trade | Last Result", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, currentTradeStatus + " | " + tradeResultStatus, text_color=tradeStatusColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    rowIndex += 1
-    
+    // Range Market Filter Status
+    rangeMarketStatus = isRangeMarket ? "RANGE" : "TREND"
+    rangeColor = isRangeMarket ? #ff6b00 : #00ff00
     table.cell(statusTable, 0, rowIndex, "Market Condition", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     table.cell(statusTable, 1, rowIndex, rangeMarketStatus, text_color=rangeColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
-    
-    // Session status
-    sessionStatus = "CLOSED"
-    sessionColor = #ff0000
-    if useSessionFilter
-        if inLondonSession and inNewYorkSession
-            sessionStatus := "LONDON+NY"
-            sessionColor := #00ff00
-        else if inLondonSession
-            sessionStatus := "LONDON"
-            sessionColor := #00ff00
-        else if inNewYorkSession
-            sessionStatus := "NEW YORK"
-            sessionColor := #00ff00
-        else
-            sessionStatus := "OFF HOURS"
-            sessionColor := #ff0000
-    else
-        sessionStatus := "FILTER OFF"
-        sessionColor := #808080
     
     table.cell(statusTable, 0, rowIndex, "Trading Session", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     table.cell(statusTable, 1, rowIndex, sessionStatus, text_color=sessionColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    keyLevelStatus = not na(lastKeyResistance) and not na(lastKeySupport) ? "R:" + formatPrice(lastKeyResistance) + " S:" + formatPrice(lastKeySupport) : "N/A"
-    midLevelText = not na(midLevel) ? " M:" + formatPrice(midLevel) : ""
-    table.cell(statusTable, 0, rowIndex, "Levels", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, keyLevelStatus + midLevelText, text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    // Trade status (enhanced)
+    table.cell(statusTable, 0, rowIndex, "Trade | Last Result", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, currentTradeStatus + " | " + tradeResultStatus, text_color=tradeStatusColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Volatility | RR", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, str.tostring(volatilityPercentile, "#.#") + "% | " + str.tostring(rrRatio, "#.#") + ":1", text_color=volatilityPercentile >= minVolatilityPercentile ? #00ff00 : #ffa500, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    // v5 Features Status
+    table.cell(statusTable, 0, rowIndex, "3-Bar Confirm | Cooldown", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, confirmationStatus + " | " + cooldownStatus, text_color=inCooldown ? #ff0000 : #00ff00, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Valid Trades | Wins/Losses", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, str.tostring(validTradesCount) + " | " + str.tostring(totalWins) + "/" + str.tostring(totalLosses), text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    // Volatility & RR - Show configured RR
+    table.cell(statusTable, 0, rowIndex, "Volatility | Risk/Reward", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(volatilityPercentile, "#.#") + "% | " + str.tostring(rrRatio, "#.#") + ":1", text_color=#00ff00, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
+    // Trade counts
+    table.cell(statusTable, 0, rowIndex, "Total Trades | Wins/Losses", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(totalTrades) + " | " + str.tostring(totalWins) + "/" + str.tostring(totalLosses), text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Win rates
     table.cell(statusTable, 0, rowIndex, "Overall | Buy | Sell Win%", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     table.cell(statusTable, 1, rowIndex, str.tostring(overallWinRate, "#.#") + "% | " + str.tostring(buyWinRate, "#.#") + "% | " + str.tostring(sellWinRate, "#.#") + "%", text_color=overallWinRate >= 50 ? #00ff00 : #ff0000, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
+    // Streaks
     table.cell(statusTable, 0, rowIndex, "Max Streaks | Current", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     table.cell(statusTable, 1, rowIndex, str.tostring(maxWinStreak) + "W/" + str.tostring(maxLossStreak) + "L | " + str.tostring(currentWinStreak) + "W/" + str.tostring(currentLossStreak) + "L", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Anti-Repaint | Range Filter", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, repaintingStatus + " | " + (useRangeFilter ? "ON" : "OFF"), text_color=waitForConfirmation ? #00ff00 : #ff0000, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    // Anti-repainting
+    table.cell(statusTable, 0, rowIndex, "Anti-Repainting", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, repaintingStatus, text_color=waitForConfirmation ? #00ff00 : #ff0000, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
     // RSI Exit removed - only entry filter remains for consistent RR
@@ -1379,58 +1458,66 @@ if barstate.isconfirmed
     table.cell(statusTable, 1, rowIndex, rsiEntryFilterStatus, text_color=useRsiEntryFilter ? (rsiEntryFilterBuy and rsiEntryFilterSell ? #00ff00 : #ffa500) : #808080, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
+    // First trade date
     if showFirstTradeDate and totalTrades > 0
         table.cell(statusTable, 0, rowIndex, "First Trade", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
         table.cell(statusTable, 1, rowIndex, formatDate(firstTradeTime), text_color=#00ffff, bgcolor=color.new(#2b3139, 85), text_size=size.small)
         rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Recent Win Rates (%)", text_color=color.white, bgcolor=color.new(#2b3139, 90), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, "", bgcolor=color.new(#2b3139, 90))
+    // Recent performance header
+    table.cell(statusTable, 0, rowIndex, "Non-Overlapping Win Rates (%)", text_color=color.white, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(rrRatio, "#.#") + ":1 RR TARGET: 50%+", text_color=#00ff00, bgcolor=color.new(#2b3139, 90), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 10 (111-120)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block10), text_color=color10, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    // Display all 12 non-overlapping periods in NATURAL ORDER (1–10 at top, 111–120 at bottom)
+    table.cell(statusTable, 0, rowIndex, "Trades 1-10", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent10Text, text_color=color10, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 20 (101-110)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block20), text_color=color20, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 11-20", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent20Text, text_color=color20, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 30 (91-100)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block30), text_color=color30, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 21-30", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent30Text, text_color=color30, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 40 (81-90)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block40), text_color=color40, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 31-40", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent40Text, text_color=color40, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 50 (71-80)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block50), text_color=color50, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 41-50", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent50Text, text_color=color50, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 60 (61-70)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block60), text_color=color60, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 51-60", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent60Text, text_color=color60, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 70 (51-60)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block70), text_color=color70, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 61-70", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent70Text, text_color=color70, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 80 (41-50)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block80), text_color=color80, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 71-80", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent80Text, text_color=color80, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 90 (31-40)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block90), text_color=color90, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 81-90", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent90Text, text_color=color90, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 100 (21-30)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block100), text_color=color100, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 91-100", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent100Text, text_color=color100, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 110 (11-20)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block110), text_color=color110, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 101-110", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent110Text, text_color=color110, bgcolor=color.new(#2b3139, 85), text_size=size.small)
     rowIndex += 1
     
-    table.cell(statusTable, 0, rowIndex, "Last 120 (1-10)", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
-    table.cell(statusTable, 1, rowIndex, formatWinRate(block120), text_color=color120, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, rowIndex, "Trades 111-120", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent120Text, text_color=color120, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+
+// Hidden signal detection removed - unified entry logic ensures every strategy.entry
+// has a matching visible signal. The old detection produced false positives due to
+// Pine Script's strategy engine filling orders one bar after strategy.entry is called.

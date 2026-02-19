@@ -1,0 +1,1157 @@
+//@version=6
+strategy('**EURUSD VIDYA Strategy v5 - 1:1 RR FIXED (15M Optimized)', 
+     overlay=true, 
+     max_lines_count=500, 
+     max_labels_count=500, 
+     precision=5,
+     default_qty_type=strategy.cash, 
+     default_qty_value=10000, 
+     initial_capital=100000,
+     commission_type=strategy.commission.percent, 
+     commission_value=0.03, 
+     slippage=1)
+
+// ──────────────────────── UI Groups ────────────────────────
+var string G_VIDYA = "VIDYA Settings"
+var string G_VOL = "Volume Pressure"
+var string G_VISUAL = "Visual Settings"
+var string G_SIGNAL = "Signal Settings"
+var string G_RISK = "Risk Management"
+var string G_ADV = "Advanced Filters"
+var string G_STATS = "Statistics Settings"
+var string G_V5 = "v5 Stability Improvements"
+
+// ──────────────────────── Key Level Variables ────────────────────────
+var float lastKeyResistance = na
+var float lastKeySupport = na
+
+// ──────────────────── Recent Trade Analysis ────────────────────
+var array<bool> recentTradeResults = array.new_bool()
+var int totalTrades = 0
+var int totalWins = 0
+var int totalLosses = 0
+var int currentWinStreak = 0
+var int currentLossStreak = 0
+var int maxWinStreak = 0
+var int maxWinStreakTime = na
+var int maxLossStreak = 0
+var int maxLossStreakTime = na
+var int lastTradeCloseBar = 0
+var string lastTradeID = ""
+var int firstTradeTime = na
+var int warmupWins = 0
+
+// Separate counters for Buy/Sell win rates
+var int totalBuyTrades = 0
+var int totalSellTrades = 0
+var int buyWins = 0
+var int sellWins = 0
+
+// ──────────────────── Core Functions ────────────────────
+calculateRR(bool isBuy, float entry, float target, float stop) =>
+    if isBuy
+        risk = entry - stop
+        reward = target - entry
+        reward / math.max(0.0001, risk)
+    else
+        risk = stop - entry
+        reward = entry - target
+        reward / math.max(0.0001, risk)
+
+// FIXED: Consistent stop price calculation (Optimized for EURUSD 15M)
+getStopPrice(bool isBuy, float entry) =>
+    atr_value = ta.atr(14)
+    
+    float stopPrice = na
+    if isBuy
+        // For buys: ATR-based stop below entry (EURUSD: Tighter stops, 1.3x ATR)
+        stopPrice := entry - (atr_value * 1.3)
+    else
+        // For sells: ATR-based stop above entry (EURUSD: Tighter stops, 1.3x ATR)
+        stopPrice := entry + (atr_value * 1.3)
+    
+    // Ensure stop is valid and not too close
+    minDistance = syminfo.mintick * 5  // Minimum 5 pips distance
+    if isBuy
+        stopPrice := math.min(stopPrice, entry - minDistance)
+    else
+        stopPrice := math.max(stopPrice, entry + minDistance)
+    
+    // Round to proper precision
+    stopPrice := math.round(stopPrice / syminfo.mintick) * syminfo.mintick
+    stopPrice
+
+// ────────────────────────── Trade ID Generation ──────────────────────────
+var int tradeIdCounter = 0
+var string currentTradeId = na
+var array<string> processedTrades = array.new_string()
+
+// ──────────────────────── Previous Day's Levels ────────────────────────
+prevDayHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+prevDayLow = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_off)
+midLevel = not na(prevDayHigh) and not na(prevDayLow) ? (prevDayHigh + prevDayLow) / 2 : na
+
+plot(midLevel, "Mid Level", color=color.new(#ffff00, 0), linewidth=2, style=plot.style_linebr)
+
+// ──────────────────────── Key Level Detection ────────────────────────
+leftBars = 10
+rightBars = 10
+swingHigh = ta.pivothigh(leftBars, rightBars)
+swingLow = ta.pivotlow(leftBars, rightBars)
+
+if not na(swingHigh) and barstate.isconfirmed
+    lastKeyResistance := swingHigh
+if not na(swingLow) and barstate.isconfirmed
+    lastKeySupport := swingLow
+
+plot(not na(lastKeyResistance) ? lastKeyResistance : na, title="Resistance", color=color.new(#ffa500, 30), linewidth=2, style=plot.style_circles)
+plot(not na(lastKeySupport) ? lastKeySupport : na, title="Support", color=color.new(#0000ff, 30), linewidth=2, style=plot.style_circles)
+
+// ──────────────────────── Input Settings ────────────────────────
+// VIDYA Settings (Optimized for EURUSD 15M)
+vidya_length = input.int(10, 'VIDYA Length', minval=1, group=G_VIDYA, tooltip="EURUSD: Slightly longer for smoother trends")
+vidya_momentum = input.int(12, 'VIDYA Momentum', minval=1, group=G_VIDYA, tooltip="EURUSD: Higher momentum for stable pairs")
+band_distance = input.float(1.8, 'Band Distance', step=0.1, minval=0.1, group=G_VIDYA, tooltip="EURUSD: Tighter bands (lower volatility)")
+vidya_smoothing = input.int(7, 'VIDYA Smoothing', minval=1, group=G_VIDYA, tooltip="EURUSD: More smoothing for stable movements")
+source = input.source(close, 'Price Source', group=G_VIDYA)
+
+// Visual Settings
+up_trend_color = input.color(color.new(#20eab8, 80), 'Uptrend', group=G_VISUAL)
+down_trend_color = input.color(color.new(#ee3f79, 80), 'Downtrend', group=G_VISUAL)
+use_shadow = input.bool(true, 'Use Fill Shadow', group=G_VISUAL)
+band_width = input.int(2, 'VIDYA Line Width', minval=1, maxval=4, group=G_VISUAL)
+
+// Volume Pressure Settings (Optimized for EURUSD 15M)
+signal_smoothing = input.int(5, "Signal Smoothing", minval=1, group=G_VOL, tooltip="EURUSD: More smoothing for consistent volume")
+min_volume_change = input.float(12.0, "Min Volume Change (%)", minval=0.1, step=0.1, group=G_VOL, tooltip="EURUSD: Lower threshold (more stable volume)")
+vol_threshold_multiplier = input.float(1.6, "Volume Threshold", minval=0.1, step=0.1, group=G_VOL, tooltip="EURUSD: Lower threshold for more signals")
+vol_ma_length = input.int(25, "Volume MA Length", minval=1, group=G_VOL, tooltip="EURUSD: Shorter MA for faster response")
+
+// Signal Settings
+min_bars_between_signals = input.int(3, "Min Bars Between Signals", minval=1, maxval=20, group=G_SIGNAL)
+show_labels = input.bool(true, "Show Signal Labels", group=G_SIGNAL)
+show_trade_details = input.bool(true, "Show Trade Lines", group=G_SIGNAL)
+lines_duration = input.int(15, "Lines Duration (bars)", minval=5, maxval=100, group=G_SIGNAL)
+lines_transparency = input.int(50, "Lines Transparency", minval=0, maxval=100, group=G_SIGNAL)
+
+// Trade Results Settings
+show_trade_results = input.bool(true, "Show WIN/LOSS Marks", group=G_SIGNAL)
+result_label_size = input.int(3, "Result Label Size", options=[1, 2, 3, 4, 5], group=G_SIGNAL)
+result_label_offset = input.int(12, "Result Label Offset", minval=1, maxval=50, group=G_SIGNAL)
+win_color = input.color(#00ff00, "WIN Color", group=G_SIGNAL)
+loss_color = input.color(#ff0000, "LOSS Color", group=G_SIGNAL)
+
+// Advanced Filter Settings (Optimized for EURUSD 15M)
+volumeConfirmation = input.bool(true, "Require Volume Confirmation", group=G_ADV)
+minVolumeIncrease = input.float(1.15, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.1, group=G_ADV, tooltip="EURUSD: Lower threshold (more stable volume patterns)")
+useTrendFilter = input.bool(true, "Use Trend Filter", group=G_ADV)
+useVolatilityFilter = input.bool(true, "Use Volatility Filter", group=G_ADV)
+minVolatilityPercentile = input.int(15, "Min Volatility Percentile", minval=0, maxval=100, group=G_ADV, tooltip="EURUSD: Lower threshold (less volatile than GBPUSD)")
+volatilityPeriod = input.int(20, "Volatility Period", minval=5, group=G_ADV)
+consecutiveBarsRequired = input.int(1, "Consecutive Bars Required", minval=1, maxval=5, group=G_ADV)
+waitForConfirmation = input.bool(true, "Wait for Bar Close (Anti-Repainting)", group=G_ADV)
+
+// Price Action Confirmation Settings (15M Timeframe Optimized for EURUSD)
+usePriceActionConfirmation = input.bool(true, "Use Price Action Confirmation", group=G_ADV)
+priceActionStrength = input.int(1, "Price Action Strength (1=Relaxed, 2=Balanced, 3=Strict)", minval=1, maxval=3, group=G_ADV, tooltip="EURUSD: Relaxed (1) - more stable patterns, less false signals")
+useCandlestickPatterns = input.bool(true, "Use Candlestick Patterns", group=G_ADV)
+usePriceStructure = input.bool(true, "Use Price Structure (HH/HL, LH/LL)", group=G_ADV)
+useSupportResistance = input.bool(true, "Use Support/Resistance Bounce", group=G_ADV, tooltip="EURUSD: Enable S/R (respects key levels well)")
+
+// Breakout Settings (Optimized for EURUSD 15M)
+lookbackPeriod = input.int(20, "Lookback Period", minval=5, group=G_ADV, tooltip="EURUSD: Shorter lookback for 15M timeframe")
+minBreakoutSize = input.float(0.5, "Min Breakout Size (ATR %)", minval=0.1, step=0.1, group=G_ADV, tooltip="EURUSD: Lower threshold (more stable breakouts)")
+atrPeriod = input.int(14, "ATR Period", minval=5, group=G_ADV)
+minAtrFilter = input.float(0.0005, "Min ATR Filter", step=0.0001, minval=0.0001, group=G_ADV, tooltip="EURUSD: 0.0005 = 5 pips minimum (standard for EURUSD)")
+
+// Statistics Settings
+warmupPeriod = input.int(5, "Warm-up Period (Trades to Ignore)", minval=0, maxval=20, group=G_STATS)
+recentWindowSize = input.int(120, "Recent Trades Window Size", minval=10, maxval=200, group=G_STATS)
+showFirstTradeDate = input.bool(true, "Show First Trade Date", group=G_STATS)
+
+// ──────────────────── v5 STABILITY IMPROVEMENTS ────────────────────
+// 1. 3-Bar Entry Confirmation (EURUSD: Can be more lenient)
+use_3bar_confirmation = input.bool(false, "Use 3-Bar Entry Confirmation", group=G_V5, tooltip="EURUSD: Disabled by default (more stable, less need for strict confirmation)")
+
+// 2. Adaptive Position Sizing
+use_adaptive_sizing = input.bool(true, "Use Adaptive Position Sizing", group=G_V5)
+min_position_size = input.float(3000, "Min Position Size ($)", minval=1000, maxval=5000, group=G_V5)
+max_position_size = input.float(10000, "Max Position Size ($)", minval=5000, maxval=20000, group=G_V5)
+recent_trades_window = input.int(10, "Recent Trades Window", minval=5, maxval=20, group=G_V5)
+
+// 3. Loss Cooldown Period
+use_cooldown = input.bool(true, "Use Loss Cooldown", group=G_V5)
+cooldown_bars = input.int(3, "Cooldown Bars After Loss", minval=1, maxval=10, group=G_V5)
+
+// 4. Market Regime Detection (Optimized for EURUSD)
+use_regime_detection = input.bool(true, "Use Market Regime Detection", group=G_V5)
+regime_period = input.int(45, "Regime Detection Period", minval=20, maxval=100, group=G_V5, tooltip="EURUSD: Slightly shorter for 15M timeframe")
+trending_threshold = input.float(0.55, "Trending Threshold", minval=0.3, maxval=1.0, step=0.1, group=G_V5, tooltip="EURUSD: Lower threshold (more stable trends)")
+
+// 5. Volatility Percentile Filtering
+use_volatility_filter = input.bool(true, "Use Volatility Filter", group=G_V5)
+min_volatility_percentile = input.int(20, "Min Volatility Percentile", minval=0, maxval=100, group=G_V5)
+
+// 6. STRICT 1:1 Risk/Reward (Removed dynamic RR)
+// 7. Enhanced Dashboard
+show_v5_dashboard = input.bool(true, "Show v5 Dashboard", group=G_V5)
+
+// Consolidation Detection Settings (Optimized for EURUSD 15M)
+consolidationPeriod = input.int(18, "Consolidation Period (bars)", minval=1, group=G_RISK, tooltip="EURUSD: Slightly shorter for 15M")
+consolidationThreshold = input.float(0.35, "Consolidation Threshold (ATR multiple)", minval=0.1, step=0.1, group=G_RISK, tooltip="EURUSD: Lower threshold (tighter consolidation detection)")
+
+// Risk Management Settings - STRICT 1:1 RR
+rrRatio = 1.0  // Hardcoded to 1:1
+maxRiskPercent = input.float(1.0, "Max Risk % per Trade", minval=0.1, maxval=5.0, step=0.1, group=G_RISK)
+maxTradeDuration = input.int(40, "Max Trade Duration (bars)", minval=5, maxval=100, group=G_RISK)
+
+// Strategy-specific inputs
+initialCapital = input.float(100000, "Initial Capital", minval=1000, group=G_RISK)
+slippagePct = input.float(0.03, "Slippage (%)", minval=0, step=0.01, group=G_RISK)
+commissionPct = input.float(0.03, "Commission (%)", minval=0, step=0.01, group=G_RISK)
+
+// ──────────────────────── Core Calculation Logic ────────────────────────
+atr_value = ta.atr(atrPeriod)
+avgVolume = ta.sma(volume, 20)
+
+// Volatility Percentile Calculation
+volatilityPercentile = ta.percentrank(atr_value, volatilityPeriod) * 100
+
+// VIDYA Calculation Function
+vidya_calc(src, len, mom, smooth) =>
+    momentum = ta.change(src)
+    sum_pos = math.sum(momentum >= 0 ? momentum : 0.0, mom)
+    sum_neg = math.sum(momentum >= 0 ? 0.0 : -momentum, mom)
+    abs_cmo = math.abs(100 * (sum_pos - sum_neg) / (sum_pos + sum_neg))
+    alpha = 2 / (len + 1)
+    var float vidya_val = src
+    vidya_val := alpha * abs_cmo / 100 * src + (1 - alpha * abs_cmo / 100) * nz(vidya_val[1])
+    ta.sma(vidya_val, smooth)
+
+// ──────────────────── v5 IMPROVEMENTS IMPLEMENTATION ────────────────────
+
+// 1. 3-Bar Entry Confirmation System
+var int bullishConfirmationBars = 0
+var int bearishConfirmationBars = 0
+
+// Update confirmation bars
+if barstate.isconfirmed
+    if close > open and high > high[1]
+        bullishConfirmationBars := bullishConfirmationBars + 1
+        bearishConfirmationBars := 0
+    else if close < open and low < low[1]
+        bearishConfirmationBars := bearishConfirmationBars + 1
+        bullishConfirmationBars := 0
+    else
+        bullishConfirmationBars := 0
+        bearishConfirmationBars := 0
+
+valid3BarBullish = not use_3bar_confirmation or bullishConfirmationBars >= 3
+valid3BarBearish = not use_3bar_confirmation or bearishConfirmationBars >= 3
+
+// 2. Adaptive Position Sizing - Function to calculate recent win rate
+calculateRecentWinRate(windowSize) =>
+    wins = 0
+    total = 0
+    arraySize = array.size(recentTradeResults)
+    if arraySize >= windowSize
+        for i = math.max(0, arraySize - windowSize) to arraySize - 1
+            if array.get(recentTradeResults, i)
+                wins := wins + 1
+            total := total + 1
+        total > 0 ? (wins / total) * 100 : 50.0  // Default to 50% if no data
+    else
+        50.0
+
+recentWinRate = calculateRecentWinRate(recent_trades_window)
+positionSizeMultiplier = math.max(0.3, math.min(1.0, recentWinRate / 50.0))  // 30% to 100% based on win rate
+adaptivePositionSize = min_position_size + (max_position_size - min_position_size) * positionSizeMultiplier
+
+// 3. Loss Cooldown System
+var int cooldownCounter = 0
+var bool inCooldown = false
+
+// Update cooldown counter
+if inCooldown
+    cooldownCounter := cooldownCounter + 1
+    if cooldownCounter >= cooldown_bars
+        inCooldown := false
+        cooldownCounter := 0
+
+// 4. Market Regime Detection
+atr_ma = ta.sma(atr_value, regime_period)
+atr_ratio = atr_value / atr_ma
+is_trending_market = atr_ratio > trending_threshold
+is_ranging_market = not is_trending_market
+
+// 5. Enhanced Volatility Filtering
+volatilityFilterPassed = not use_volatility_filter or volatilityPercentile >= min_volatility_percentile
+
+// State Variables
+var bool is_trend_up = false
+var int consecutiveBullishBars = 0
+var int consecutiveBearishBars = 0
+
+// Main VIDYA Calculation
+vidya_value = vidya_calc(source, vidya_length, vidya_momentum, vidya_smoothing)
+upper_band = vidya_value + atr_value * band_distance
+lower_band = vidya_value - atr_value * band_distance
+
+// Call crossover/crossunder on every bar for consistency
+crossoverHappened = ta.crossover(source, upper_band)
+crossunderHappened = ta.crossunder(source, lower_band)
+
+// Trend Determination - Only update when confirmed if anti-repainting is enabled
+if (waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation
+    if crossoverHappened
+        is_trend_up := true
+    if crossunderHappened
+        is_trend_up := false
+
+// Band Calculation
+smoothed_value = is_trend_up ? lower_band : upper_band
+trend_color = is_trend_up ? up_trend_color : down_trend_color
+
+// Update consecutive bars count - Only when confirmed if anti-repainting is enabled
+if (waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation
+    if close > open
+        consecutiveBullishBars := consecutiveBullishBars + 1
+        consecutiveBearishBars := 0
+    else if close < open
+        consecutiveBearishBars := consecutiveBearishBars + 1
+        consecutiveBullishBars := 0
+    else
+        consecutiveBullishBars := 0
+        consecutiveBearishBars := 0
+
+// ──────────────────── Volume Pressure System ────────────────────
+upVol = volume * (close > open ? 1 : 0)
+downVol = volume * (close < open ? 1 : 0)
+deltaVol = upVol - downVol
+
+smoothedVol = ta.ema(deltaVol, vol_ma_length)
+volumeSMA = ta.sma(volume, vol_ma_length)
+volRatio = volumeSMA != 0 ? (smoothedVol / volumeSMA) * 100 : 0
+signalLine = ta.ema(volRatio, signal_smoothing)
+threshold = vol_threshold_multiplier
+
+// Only evaluate signals when confirmed if anti-repainting is enabled
+is_strong_buy = volRatio > threshold and volRatio > signalLine and volRatio > min_volume_change
+is_strong_sell = volRatio < -threshold and volRatio < signalLine and volRatio < -min_volume_change
+
+is_trend_confirmed = (is_strong_buy and is_trend_up) or (is_strong_sell and not is_trend_up)
+
+// ──────────────────── Trade Management Variables ────────────────────
+var float buy_entry = na
+var float buy_target = na
+var float buy_stop = na
+
+var float sell_entry = na
+var float sell_target = na
+var float sell_stop = na
+
+// FIXED: Store signal values for consistent plotting
+var float signal_buy_entry = na
+var float signal_buy_target = na  
+var float signal_buy_stop = na
+
+var float signal_sell_entry = na
+var float signal_sell_target = na
+var float signal_sell_stop = na
+
+// ──────────────────── STRICT 1:1 RR TARGET CALCULATION ────────────────────
+// FIXED: Calculate once and store for consistency
+if ((waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation) and is_strong_buy and is_trend_up
+    buy_entry := close
+    buy_stop := getStopPrice(true, close)
+    riskDistance = math.max(buy_entry - buy_stop, syminfo.mintick * 5)
+    buy_target := buy_entry + riskDistance  // STRICT 1:1
+    
+    // Store signal values for consistent plotting
+    signal_buy_entry := buy_entry
+    signal_buy_target := buy_target
+    signal_buy_stop := buy_stop
+else
+    buy_entry := na
+    buy_target := na
+    buy_stop := na
+
+// FIXED: Calculate once and store for consistency
+if ((waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation) and is_strong_sell and not is_trend_up
+    sell_entry := close
+    sell_stop := getStopPrice(false, close)
+    riskDistance = math.max(sell_stop - sell_entry, syminfo.mintick * 5)
+    sell_target := sell_entry - riskDistance  // STRICT 1:1
+    
+    // Store signal values for consistent plotting
+    signal_sell_entry := sell_entry
+    signal_sell_target := sell_target
+    signal_sell_stop := sell_stop
+else
+    sell_entry := na
+    sell_target := na
+    sell_stop := na
+
+// ──────────────────── Consolidation Detection ────────────────────
+consolidationHigh = ta.highest(high, consolidationPeriod)
+consolidationLow = ta.lowest(low, consolidationPeriod)
+consolidationRange = consolidationHigh - consolidationLow
+consolidationATR = atr_value * consolidationThreshold
+
+isConsolidating = not na(consolidationATR) and consolidationRange < consolidationATR
+
+// ──────────────────── Advanced Breakout Detection ────────────────────
+highestHigh = ta.highest(high[1], lookbackPeriod)
+lowestLow = ta.lowest(low[1], lookbackPeriod)
+
+minBreakoutAmount = atr_value * minBreakoutSize / 100
+significantBreakoutUp = (high - highestHigh) >= minBreakoutAmount
+significantBreakoutDown = (low - lowestLow) <= -minBreakoutAmount
+validAtrCondition = not na(atr_value) and atr_value >= minAtrFilter
+
+// Volume confirmation
+volumeIncreaseCondition = not volumeConfirmation or volume > avgVolume * minVolumeIncrease
+
+// ──────────────────── Enhanced Price Action Confirmation (15M Optimized) ────────────────────
+// Candlestick Pattern Detection
+bodySize = math.abs(close - open)
+candleRange = high - low
+bodyRatio = candleRange > 0 ? bodySize / candleRange : 0
+
+// Bullish Patterns
+bullishEngulfing = close > open and close[1] < open[1] and close > open[1] and open < close[1] and bodySize > bodySize[1] * 0.8
+bullishPinBar = (low < math.min(open, close) - bodySize * 0.6) and (close > open) and (bodyRatio > 0.3)
+bullishHammer = (low < math.min(open, close) - bodySize * 0.5) and (close > open) and ((high - math.max(open, close)) < bodySize * 0.3)
+strongBullishCandle = close > open and bodySize > candleRange * 0.6 and close > (high + low) / 2
+
+// Bearish Patterns
+bearishEngulfing = close < open and close[1] > open[1] and close < open[1] and open > close[1] and bodySize > bodySize[1] * 0.8
+bearishPinBar = (high > math.max(open, close) + bodySize * 0.6) and (close < open) and (bodyRatio > 0.3)
+bearishShootingStar = (high > math.max(open, close) + bodySize * 0.5) and (close < open) and ((math.min(open, close) - low) < bodySize * 0.3)
+strongBearishCandle = close < open and bodySize > candleRange * 0.6 and close < (high + low) / 2
+
+// Price Structure Analysis (Higher Highs/Lows, Lower Highs/Lows)
+lookbackStructure = 6  // Look back 6 bars for structure (EURUSD: Slightly longer for smoother trends)
+recentHigh = ta.highest(high[1], lookbackStructure)
+recentLow = ta.lowest(low[1], lookbackStructure)
+prevRecentHigh = ta.highest(high[2], lookbackStructure)
+prevRecentLow = ta.lowest(low[2], lookbackStructure)
+
+// Bullish Structure: Higher Highs and Higher Lows
+higherHigh = high > prevRecentHigh
+higherLow = low > prevRecentLow
+bullishStructure = higherHigh or higherLow
+
+// Bearish Structure: Lower Highs and Lower Lows
+lowerHigh = high < prevRecentHigh
+lowerLow = low < prevRecentLow
+bearishStructure = lowerHigh or lowerLow
+
+// Support/Resistance Bounce Confirmation (ATR-based tolerance for EURUSD 15M)
+srTolerance = atr_value * 0.25  // 25% of ATR for tolerance (EURUSD: Tighter tolerance, more precise levels)
+supportBounce = not na(lastKeySupport) and low <= lastKeySupport + srTolerance and low >= lastKeySupport - srTolerance and close > lastKeySupport
+resistanceBreak = not na(lastKeyResistance) and close > lastKeyResistance - srTolerance and close <= lastKeyResistance + srTolerance * 2
+resistanceBounce = not na(lastKeyResistance) and high >= lastKeyResistance - srTolerance and high <= lastKeyResistance + srTolerance and close < lastKeyResistance
+supportBreak = not na(lastKeySupport) and close < lastKeySupport + srTolerance and close >= lastKeySupport - srTolerance * 2
+
+// Breakout Confirmation (original logic enhanced)
+breakoutAbove = close > ta.highest(high[2], 3)
+breakoutBelow = close < ta.lowest(low[2], 3)
+
+// Combined Price Action Confirmation Functions
+getPriceActionScore(isBullish) =>
+    score = 0
+    maxScore = 0
+    
+    // Base breakout confirmation (always checked)
+    maxScore := maxScore + 1
+    if isBullish
+        if breakoutAbove
+            score := score + 1
+    else
+        if breakoutBelow
+            score := score + 1
+    
+    // Candlestick patterns (if enabled)
+    if useCandlestickPatterns
+        maxScore := maxScore + 1
+        if isBullish
+            if bullishEngulfing or bullishPinBar or bullishHammer or strongBullishCandle
+                score := score + 1
+        else
+            if bearishEngulfing or bearishPinBar or bearishShootingStar or strongBearishCandle
+                score := score + 1
+    
+    // Price structure (if enabled)
+    if usePriceStructure
+        maxScore := maxScore + 1
+        if isBullish
+            if bullishStructure
+                score := score + 1
+        else
+            if bearishStructure
+                score := score + 1
+    
+    // Support/Resistance (if enabled)
+    if useSupportResistance
+        maxScore := maxScore + 1
+        if isBullish
+            if supportBounce or resistanceBreak
+                score := score + 1
+        else
+            if resistanceBounce or supportBreak
+                score := score + 1
+    
+    // Calculate required score based on strength setting
+    float requiredScore = na
+    if priceActionStrength == 1
+        requiredScore := math.max(1, math.floor(maxScore * 0.4))
+    else if priceActionStrength == 2
+        requiredScore := math.max(1, math.floor(maxScore * 0.6))
+    else
+        requiredScore := math.max(1, math.floor(maxScore * 0.8))
+    
+    score >= requiredScore
+
+// Price Action Confirmation Logic - Using confirmed bars to avoid repainting
+isValidBullishSignal() =>
+    if not usePriceActionConfirmation
+        // Original simple confirmation if disabled
+        close > ta.highest(high[2], 3)
+    else
+        // Enhanced confirmation with scoring system
+        getPriceActionScore(true)
+
+isValidBearishSignal() =>
+    if not usePriceActionConfirmation
+        // Original simple confirmation if disabled
+        close < ta.lowest(low[2], 3)
+    else
+        // Enhanced confirmation with scoring system
+        getPriceActionScore(false)
+
+isValidBullish = isValidBullishSignal()
+isValidBearish = isValidBearishSignal()
+
+// ──────────────────── Signal Control ────────────────────
+var bool inTrade = false
+var int lastTradeBar = 0
+var int lastSignalBar = 0
+var bool tradeCompleted = true
+var bool tradeSuccess = false
+var float currentEntry = na
+var float currentTarget = na
+var float currentStop = na
+var bool isBuyTrade = false
+var int entryBarIndex = 0
+var float exitPrice = na
+var string exitReason = na
+
+// Signal control
+var int lastLabelBar = 0
+
+minBarsPassed = (bar_index - lastLabelBar >= min_bars_between_signals) and (bar_index - lastSignalBar >= min_bars_between_signals)
+midLevelAvailable = not na(midLevel)
+
+// Consecutive bars condition
+consecutiveBarsBuy = consecutiveBullishBars >= consecutiveBarsRequired
+consecutiveBarsSell = consecutiveBearishBars >= consecutiveBarsRequired
+
+// Volatility condition
+volatilityCondition = not useVolatilityFilter or (not na(volatilityPercentile)) and volatilityPercentile >= minVolatilityPercentile
+
+// Bar confirmation condition for anti-repainting
+barConfirmation = not waitForConfirmation or barstate.isconfirmed
+
+// ──────────────────── SIGNAL DISPLAY FIXES ────────────────────
+// Track signal execution vs display for accuracy monitoring
+var int hiddenSignals = 0
+var int displayedSignals = 0
+var bool justEnteredTrade = false
+
+// Update trade entry tracking
+if strategy.opentrades == 1 and strategy.opentrades[1] == 0
+    justEnteredTrade := true
+else if barstate.isconfirmed
+    justEnteredTrade := false
+
+// FIXED: Use stored signal values for display
+showBuySignal = 
+  barConfirmation and
+  not inTrade and 
+  not inCooldown and
+  is_trend_confirmed and 
+  is_strong_buy and 
+  minBarsPassed and 
+  not isConsolidating and 
+  midLevelAvailable and 
+  close > midLevel and
+  significantBreakoutUp and
+  validAtrCondition and
+  volumeIncreaseCondition and
+  consecutiveBarsBuy and
+  volatilityCondition and
+  volatilityFilterPassed and
+  isValidBullish and
+  valid3BarBullish and
+  not na(signal_buy_entry) and
+  not na(signal_buy_target)
+
+showSellSignal = 
+  barConfirmation and
+  not inTrade and 
+  not inCooldown and
+  is_trend_confirmed and 
+  is_strong_sell and 
+  minBarsPassed and 
+  not isConsolidating and 
+  midLevelAvailable and 
+  close < midLevel and
+  significantBreakoutDown and
+  validAtrCondition and
+  volumeIncreaseCondition and
+  consecutiveBarsSell and
+  volatilityCondition and
+  volatilityFilterPassed and
+  isValidBearish and
+  valid3BarBearish and
+  not na(signal_sell_entry) and
+  not na(signal_sell_target)
+
+// Force display on trade entry bars to maintain consistency for BOTH buy and sell
+forceDisplay = justEnteredTrade and barstate.isconfirmed
+showBuySignal := showBuySignal or (forceDisplay and isBuyTrade)
+showSellSignal := showSellSignal or (forceDisplay and not isBuyTrade)
+
+// Track signal accuracy
+if (showBuySignal or showSellSignal) and barstate.isconfirmed
+    displayedSignals := displayedSignals + 1
+
+// Check for hidden executions (trades without display)
+if strategy.opentrades > 0 and (not showBuySignal and not showSellSignal) and barstate.isconfirmed and not justEnteredTrade
+    hiddenSignals := hiddenSignals + 1
+
+// Function to calculate win rate for non-overlapping periods
+calculateNonOverlappingWinRate(startIdx, endIdx) =>
+    wins = 0
+    total = 0
+    arraySize = array.size(recentTradeResults)
+    
+    if arraySize > endIdx
+        for i = startIdx to endIdx
+            if array.get(recentTradeResults, i)
+                wins += 1
+            total += 1
+        total > 0 ? (wins / total) * 100 : 0
+    else
+        0
+
+// Calculate non-overlapping periods
+recent10WinRate = calculateNonOverlappingWinRate(0, 9)
+recent20WinRate = calculateNonOverlappingWinRate(10, 19)
+recent30WinRate = calculateNonOverlappingWinRate(20, 29)
+recent40WinRate = calculateNonOverlappingWinRate(30, 39)
+recent50WinRate = calculateNonOverlappingWinRate(40, 49)
+recent60WinRate = calculateNonOverlappingWinRate(50, 59)
+recent70WinRate = calculateNonOverlappingWinRate(60, 69)
+recent80WinRate = calculateNonOverlappingWinRate(70, 79)
+recent90WinRate = calculateNonOverlappingWinRate(80, 89)
+recent100WinRate = calculateNonOverlappingWinRate(90, 99)
+recent110WinRate = calculateNonOverlappingWinRate(100, 109)
+recent120WinRate = calculateNonOverlappingWinRate(110, 119)
+
+// Also keep cumulative calculations for reference
+calculateCumulativeWinRate(period) =>
+    arraySize = array.size(recentTradeResults)
+    if arraySize >= period
+        wins = 0
+        total = 0
+        for i = math.max(0, arraySize - period) to arraySize - 1
+            if array.get(recentTradeResults, i)
+                wins += 1
+            total += 1
+        total > 0 ? (wins / total) * 100 : 0
+    else
+        0
+
+cumulative10WinRate = calculateCumulativeWinRate(10)
+cumulative20WinRate = calculateCumulativeWinRate(20)
+cumulative30WinRate = calculateCumulativeWinRate(30)
+
+// Account size for risk management
+accountSize = initialCapital
+maxRiskAmount = accountSize * maxRiskPercent / 100
+
+// ──────────────────── Trade Execution Logic ────────────────────
+if inTrade
+    // Use stored signal values for consistent exit conditions
+    targetHit = isBuyTrade ? (high >= currentTarget) : (low <= currentTarget)
+    stopHit = isBuyTrade ? (low <= currentStop) : (high >= currentStop)
+    durationExpired = (bar_index - entryBarIndex) >= maxTradeDuration
+    
+    // Determine exit reason, target takes priority
+    if targetHit
+        exitReason := "TARGET"
+    else if stopHit
+        exitReason := "STOP"
+    else if durationExpired
+        exitReason := "EXPIRED"
+    
+    // When any condition is met, close the trade
+    if targetHit or stopHit or durationExpired
+        // Record actual exit price
+        exitPrice := targetHit ? currentTarget : stopHit ? currentStop : close
+        
+        // Close position
+        strategy.close_all(comment=exitReason)
+        
+        tradeCompleted := true
+        inTrade := false
+        
+        // Success if target is hit
+        tradeSuccess := exitReason == "TARGET"
+        
+        // Activate cooldown if it was a loss
+        if not tradeSuccess and use_cooldown
+            inCooldown := true
+            cooldownCounter := 0
+        
+        // Ensure we only count once
+        if not array.includes(processedTrades, currentTradeId)
+            array.push(processedTrades, currentTradeId)
+            totalTrades := totalTrades + 1
+            
+            if totalTrades == 1
+                firstTradeTime := time
+                
+            // Handle warmup period trades
+            if totalTrades <= warmupPeriod
+                if tradeSuccess
+                    warmupWins := warmupWins + 1
+            else
+                if tradeSuccess
+                    totalWins := totalWins + 1
+                else
+                    totalLosses := totalLosses + 1
+                
+                // Update win/loss streaks
+                if tradeSuccess
+                    currentWinStreak := currentWinStreak + 1
+                    currentLossStreak := 0
+                    if currentWinStreak > maxWinStreak
+                        maxWinStreak := currentWinStreak
+                        maxWinStreakTime := time
+                else
+                    currentLossStreak := currentLossStreak + 1
+                    currentWinStreak := 0
+                    if currentLossStreak > maxLossStreak
+                        maxLossStreak := currentLossStreak
+                        maxLossStreakTime := time
+                
+                // Record recent trade results
+                array.push(recentTradeResults, tradeSuccess)
+                if array.size(recentTradeResults) > recentWindowSize
+                    array.shift(recentTradeResults)
+                    
+                // Update buy/sell specific counters
+                if isBuyTrade
+                    totalBuyTrades := totalBuyTrades + 1
+                    if tradeSuccess
+                        buyWins := buyWins + 1
+                else
+                    totalSellTrades := totalSellTrades + 1
+                    if tradeSuccess
+                        sellWins := sellWins + 1
+        
+        lastTradeCloseBar := bar_index
+        lastTradeID := currentTradeId
+        
+        // Show trade result labels with exit reason
+        if show_trade_results
+            pointOffset = result_label_offset * syminfo.mintick
+            labelText = tradeSuccess ? "WIN\n" + exitReason : "LOSS\n" + exitReason
+            
+            label.new(bar_index, 
+                     isBuyTrade ? (tradeSuccess ? high + pointOffset : low - pointOffset) : 
+                                  (tradeSuccess ? low - pointOffset : high + pointOffset), 
+                     labelText, 
+                     style=tradeSuccess ? (isBuyTrade ? label.style_label_down : label.style_label_up) : 
+                                          (isBuyTrade ? label.style_label_up : label.style_label_down),
+                     color=color.new(tradeSuccess ? win_color : loss_color, 0), 
+                     textcolor=color.white, 
+                     size=result_label_size == 1 ? size.tiny : 
+                          result_label_size == 2 ? size.small : 
+                          result_label_size == 3 ? size.normal : 
+                          result_label_size == 4 ? size.large : size.huge,
+                     yloc=yloc.price,
+                     textalign=text.align_center)
+
+// Process new signals with adaptive position sizing
+if (showBuySignal or showSellSignal) and not inTrade
+    tradeIdCounter := tradeIdCounter + 1
+    currentTradeId := "T" + str.tostring(tradeIdCounter)
+    
+    if showBuySignal
+        // Use stored signal values for execution
+        actualEntry = signal_buy_entry
+        actualTarget = signal_buy_target
+        actualStop = signal_buy_stop
+        
+        actualRR = calculateRR(true, actualEntry, actualTarget, actualStop)
+        formattedEntry = str.tostring(actualEntry, "#.#####")
+        formattedTarget = str.tostring(actualTarget, "#.#####")
+        formattedStop = str.tostring(actualStop, "#.#####")
+        currentTimeframe = timeframe.period
+        riskPercentage = str.tostring(maxRiskPercent, "#.#") + "%"
+        
+        timeStamp = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss'Z'}", time)
+        alertMsg = '{"action": "BUY", "symbol": "' + syminfo.ticker + '", "timeframe": "' + currentTimeframe + '", "entry": "' + formattedEntry + '", "target": "' + formattedTarget + '", "stop": "' + formattedStop + '", "id": "' + currentTradeId + '", "rr": "' + str.tostring(actualRR, "#.##") + '", "risk": "' + riskPercentage + '", "time": "' + timeStamp + '"}'
+        
+        inTrade := true
+        tradeCompleted := false
+        currentEntry := actualEntry
+        currentTarget := actualTarget
+        currentStop := actualStop
+        isBuyTrade := true
+        entryBarIndex := bar_index
+        lastTradeBar := bar_index
+        lastLabelBar := bar_index
+        lastSignalBar := bar_index
+        
+        riskPerShare = currentEntry - currentStop
+        // Use adaptive position sizing
+        positionSize = use_adaptive_sizing ? adaptivePositionSize : maxRiskAmount
+        shares = riskPerShare > 0 ? positionSize / riskPerShare : 1000
+        
+        strategy.entry("Buy", strategy.long, qty=shares)
+        strategy.exit("Exit Buy", "Buy", stop=currentStop, limit=currentTarget, comment="Exit Buy")
+        
+        alert(alertMsg)
+    
+    if showSellSignal
+        // Use stored signal values for execution
+        actualEntry = signal_sell_entry
+        actualTarget = signal_sell_target
+        actualStop = signal_sell_stop
+        
+        actualRR = calculateRR(false, actualEntry, actualTarget, actualStop)
+        formattedEntry = str.tostring(actualEntry, "#.#####")
+        formattedTarget = str.tostring(actualTarget, "#.#####")
+        formattedStop = str.tostring(actualStop, "#.#####")
+        currentTimeframe = timeframe.period
+        riskPercentage = str.tostring(maxRiskPercent, "#.#") + "%"
+        
+        timeStamp = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss'Z'}", time)
+        alertMsg = '{"action": "SELL", "symbol": "' + syminfo.ticker + '", "timeframe": "' + currentTimeframe + '", "entry": "' + formattedEntry + '", "target": "' + formattedTarget + '", "stop": "' + formattedStop + '", "id": "' + currentTradeId + '", "rr": "' + str.tostring(actualRR, "#.##") + '", "risk": "' + riskPercentage + '", "time": "' + timeStamp + '"}'
+        
+        inTrade := true
+        tradeCompleted := false
+        currentEntry := actualEntry
+        currentTarget := actualTarget
+        currentStop := actualStop
+        isBuyTrade := false
+        entryBarIndex := bar_index
+        lastTradeBar := bar_index
+        lastLabelBar := bar_index
+        lastSignalBar := bar_index
+        
+        riskPerShare = currentStop - currentEntry
+        // Use adaptive position sizing
+        positionSize = use_adaptive_sizing ? adaptivePositionSize : maxRiskAmount
+        shares = riskPerShare > 0 ? positionSize / riskPerShare : 1000
+        
+        strategy.entry("Sell", strategy.short, qty=shares)
+        strategy.exit("Exit Sell", "Sell", stop=currentStop, limit=currentTarget, comment="Exit Sell")
+        
+        alert(alertMsg)
+
+// ──────────────────────── Plotting & Visualization ────────────────────────
+p1 = plot(smoothed_value, "VIDYA Band", color=trend_color, linewidth=band_width)
+p2 = plot(hl2, display=display.none)
+fill(p1, p2, color.new(trend_color, use_shadow ? 80 : 100))
+
+plotshape(showBuySignal, title="Buy Signal", location=location.belowbar, 
+         color=color.new(#0000ff, 0), style=shape.triangleup, size=size.normal)
+plotshape(showSellSignal, title="Sell Signal", location=location.abovebar, 
+         color=color.new(#800080, 0), style=shape.triangledown, size=size.normal)
+
+formatPrice(price) =>
+    str.tostring(price, "#.#####")
+
+formatDate(t) =>
+    not na(t) ? str.format("{0,date,yyyy-MM-dd HH:mm}", t) : "N/A"
+
+formatMoney(value) =>
+    value >= 0 ? "$" + str.tostring(value, "#,##0.00") : "-$" + str.tostring(math.abs(value), "#,##0.00")
+
+if show_labels
+    if showBuySignal
+        rrActual = calculateRR(true, signal_buy_entry, signal_buy_target, signal_buy_stop)
+    
+        buy_text = "▲ BUY\n" +
+                  "Entry: " + formatPrice(signal_buy_entry) + "\n" +
+                  "Target: " + formatPrice(signal_buy_target) + "\n" +
+                  "Stop: " + formatPrice(signal_buy_stop) + "\n" +
+                  "RR: " + str.tostring(rrActual, "#.##") + ":1\n" +
+                  "ID: " + currentTradeId + "\n" +
+                  "Time: " + str.format("{0,date,MM-dd HH:mm}", time)
+        
+        label.new(bar_index, low, buy_text, style=label.style_label_up, 
+             color=color.new(#0000ff, 90), textcolor=color.white, size=size.normal,
+             textalign=text.align_center)
+    
+    if showSellSignal
+        rrActual = calculateRR(false, signal_sell_entry, signal_sell_target, signal_sell_stop)
+        
+        sell_text = "▼ SELL\n" +
+                   "Entry: " + formatPrice(signal_sell_entry) + "\n" +
+                   "Target: " + formatPrice(signal_sell_target) + "\n" +
+                   "Stop: " + formatPrice(signal_sell_stop) + "\n" +
+                   "RR: " + str.tostring(rrActual, "#.##") + ":1\n" +
+                   "ID: " + currentTradeId + "\n" +
+                   "Time: " + str.format("{0,date,MM-dd HH:mm}", time)
+        
+        label.new(bar_index, high, sell_text, style=label.style_label_down, 
+             color=color.new(#800080, 90), textcolor=color.white, size=size.normal,
+             textalign=text.align_center)
+
+// ──────────────────── Trade Line Management ────────────────────
+var line entryLine = line.new(bar_index, close, bar_index, close, extend=extend.none)
+var line targetLine = line.new(bar_index, close, bar_index, close, extend=extend.none)
+var line stopLine = line.new(bar_index, close, bar_index, close, extend=extend.none)
+
+// FIXED: Use stored signal values for consistent plotting
+currentPlotEntry = inTrade ? currentEntry : na
+currentPlotTarget = inTrade ? currentTarget : na
+currentPlotStop = inTrade ? currentStop : na
+
+if show_trade_details and not na(currentPlotEntry) and bar_index - entryBarIndex <= lines_duration
+    entryColor = isBuyTrade ? #0000ff : #800080
+    
+    line.delete(entryLine)
+    entryLine := line.new(
+         entryBarIndex, currentPlotEntry, bar_index, currentPlotEntry,
+         xloc=xloc.bar_index, extend=extend.right,
+         color=color.new(entryColor, lines_transparency), width=2, style=line.style_solid)
+    
+    line.delete(targetLine)
+    targetLine := line.new(
+         entryBarIndex, currentPlotTarget, bar_index, currentPlotTarget,
+         xloc=xloc.bar_index, extend=extend.right,
+         color=color.new(#00ff00, lines_transparency), width=2, style=line.style_dashed)
+    
+    line.delete(stopLine)
+    stopLine := line.new(
+         entryBarIndex, currentPlotStop, bar_index, currentPlotStop,
+         xloc=xloc.bar_index, extend=extend.right,
+         color=color.new(#ff0000, lines_transparency), width=2, style=line.style_dashed)
+else
+    line.delete(entryLine)
+    line.delete(targetLine)
+    line.delete(stopLine)
+
+// ──────────────────────── ENHANCED v5 DASHBOARD ────────────────────────
+totalValidTrades = totalTrades - warmupPeriod
+overallWinRate = totalValidTrades > 0 ? (totalWins * 100.0) / totalValidTrades : 0
+
+// Calculate buy/sell win rates
+buyWinRate = totalBuyTrades > 0 ? (buyWins / totalBuyTrades) * 100 : 0
+sellWinRate = totalSellTrades > 0 ? (sellWins / totalSellTrades) * 100 : 0
+
+// Helper functions for win rate formatting and coloring
+getWinRateColor(winRate) =>
+    winRate >= 50 ? #00ff00 : #ff0000
+
+formatWinRate(winRate) =>
+    str.tostring(winRate, "#.##") + "%"
+
+// Create enhanced dashboard table
+var table statusTable = table.new(position.top_right, 2, 36, border_width=1, bgcolor=color.new(#000000, 80))
+
+if barstate.isconfirmed and show_v5_dashboard
+    table.clear(statusTable, 0, 0)
+    
+    trendStatus = is_trend_up ? "UP ▲" : "DOWN ▼"
+    volumeStatus = is_strong_buy ? "BULL" : is_strong_sell ? "BEAR" : "NEU"
+    regimeStatus = is_trending_market ? "TRENDING" : "RANGING"
+    
+    signalStatus = "NONE"
+    signalColor = #808080
+    if showBuySignal
+        signalStatus := "BUY"
+        signalColor := #0000ff
+    else if showSellSignal
+        signalStatus := "SELL"
+        signalColor := #800080
+    
+    currentTradeStatus = inTrade ? (isBuyTrade ? "BUY" : "SELL") + " ACTIVE" : "NO TRADE"
+    tradeStatusColor = inTrade ? (isBuyTrade ? #0000ff : #800080) : #808080
+    
+    tradeResultStatus = "N/A"
+    tradeResultColor = #808080
+    if tradeCompleted and totalTrades > 0
+        if tradeSuccess
+            tradeResultStatus := "WIN " + exitReason
+            tradeResultColor := #00ff00
+        else
+            tradeResultStatus := "LOSS " + exitReason
+            tradeResultColor := #ff0000
+    
+    repaintingStatus = waitForConfirmation ? "ON" : "OFF"
+    cooldownStatus = inCooldown ? "ACTIVE (" + str.tostring(cooldown_bars - cooldownCounter) + ")" : "INACTIVE"
+    confirmationStatus = "BULL:" + str.tostring(bullishConfirmationBars) + " BEAR:" + str.tostring(bearishConfirmationBars)
+    
+    // Apply color logic to each win rate
+    color120 = getWinRateColor(recent120WinRate)
+    color110 = getWinRateColor(recent110WinRate)
+    color100 = getWinRateColor(recent100WinRate)
+    color90 = getWinRateColor(recent90WinRate)
+    color80 = getWinRateColor(recent80WinRate)
+    color70 = getWinRateColor(recent70WinRate)
+    color60 = getWinRateColor(recent60WinRate)
+    color50 = getWinRateColor(recent50WinRate)
+    color40 = getWinRateColor(recent40WinRate)
+    color30 = getWinRateColor(recent30WinRate)
+    color20 = getWinRateColor(recent20WinRate)
+    color10 = getWinRateColor(recent10WinRate)
+
+    // Generate text for each period (reversed order)
+    recent120Text = formatWinRate(recent120WinRate)
+    recent110Text = formatWinRate(recent110WinRate)
+    recent100Text = formatWinRate(recent100WinRate)
+    recent90Text = formatWinRate(recent90WinRate)
+    recent80Text = formatWinRate(recent80WinRate)
+    recent70Text = formatWinRate(recent70WinRate)
+    recent60Text = formatWinRate(recent60WinRate)
+    recent50Text = formatWinRate(recent50WinRate)
+    recent40Text = formatWinRate(recent40WinRate)
+    recent30Text = formatWinRate(recent30WinRate)
+    recent20Text = formatWinRate(recent20WinRate)
+    recent10Text = formatWinRate(recent10WinRate)
+
+    // Enhanced Dashboard layout
+    rowIndex = 0
+    
+    // Header
+    table.cell(statusTable, 0, rowIndex, "EURUSD VIDYA Strategy v5", text_color=color.white, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, "1:1 RR FIXED (15M)", text_color=#00ff00, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    rowIndex += 1
+    
+    // === SIGNAL ACCURACY DIAGNOSTIC ===
+    table.cell(statusTable, 0, rowIndex, "=== SIGNAL ACCURACY ===", text_color=color.yellow, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, hiddenSignals > 0 ? "ISSUE DETECTED!" : "ACCURATE", text_color=hiddenSignals > 0 ? #ff0000 : #00ff00, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Displayed Signals", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(displayedSignals), text_color=#00ff00, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Hidden Executions", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(hiddenSignals), text_color=hiddenSignals > 0 ? #ff0000 : #00ff00, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Market status (enhanced)
+    table.cell(statusTable, 0, rowIndex, "Trend | Volume | Regime", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, trendStatus + " | " + volumeStatus + " | " + regimeStatus, text_color=signalColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Trade status (enhanced)
+    table.cell(statusTable, 0, rowIndex, "Trade | Last Result", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, currentTradeStatus + " | " + tradeResultStatus, text_color=tradeStatusColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // v5 Features Status
+    table.cell(statusTable, 0, rowIndex, "3-Bar Confirm | Cooldown", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, confirmationStatus + " | " + cooldownStatus, text_color=inCooldown ? #ff0000 : #00ff00, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Volatility & RR - Show fixed 1:1
+    table.cell(statusTable, 0, rowIndex, "Volatility | Risk/Reward", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    currentRR = 1.0  // Always show 1:1
+    table.cell(statusTable, 1, rowIndex, str.tostring(volatilityPercentile, "#.#") + "% | " + str.tostring(currentRR, "#.#") + ":1 FIXED", text_color=#00ff00, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Trade counts
+    table.cell(statusTable, 0, rowIndex, "Total Trades | Wins/Losses", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(totalTrades) + " | " + str.tostring(totalWins) + "/" + str.tostring(totalLosses), text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Win rates
+    table.cell(statusTable, 0, rowIndex, "Overall | Buy | Sell Win%", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(overallWinRate, "#.#") + "% | " + str.tostring(buyWinRate, "#.#") + "% | " + str.tostring(sellWinRate, "#.#") + "%", text_color=overallWinRate >= 50 ? #00ff00 : #ff0000, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Streaks
+    table.cell(statusTable, 0, rowIndex, "Max Streaks | Current", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, str.tostring(maxWinStreak) + "W/" + str.tostring(maxLossStreak) + "L | " + str.tostring(currentWinStreak) + "W/" + str.tostring(currentLossStreak) + "L", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // Anti-repainting
+    table.cell(statusTable, 0, rowIndex, "Anti-Repainting", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, repaintingStatus, text_color=waitForConfirmation ? #00ff00 : #ff0000, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    // First trade date
+    if showFirstTradeDate and totalTrades > 0
+        table.cell(statusTable, 0, rowIndex, "First Trade", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+        table.cell(statusTable, 1, rowIndex, formatDate(firstTradeTime), text_color=#00ffff, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+        rowIndex += 1
+    
+    // Recent performance header
+    table.cell(statusTable, 0, rowIndex, "Non-Overlapping Win Rates (%)", text_color=color.white, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, "1:1 RR TARGET: 50%+", text_color=#00ff00, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    rowIndex += 1
+    
+    // Display all 12 non-overlapping periods in REVERSE ORDER
+    table.cell(statusTable, 0, rowIndex, "Trades 111-120", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent120Text, text_color=color120, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 101-110", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent110Text, text_color=color110, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 91-100", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent100Text, text_color=color100, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 81-90", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent90Text, text_color=color90, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 71-80", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent80Text, text_color=color80, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 61-70", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent70Text, text_color=color70, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 51-60", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent60Text, text_color=color60, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 41-50", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent50Text, text_color=color50, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 31-40", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent40Text, text_color=color40, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 21-30", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent30Text, text_color=color30, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 11-20", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent20Text, text_color=color20, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+    
+    table.cell(statusTable, 0, rowIndex, "Trades 1-10", text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 1, rowIndex, recent10Text, text_color=color10, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    rowIndex += 1
+
+// Show warning for hidden signals
+if hiddenSignals > 0 and barstate.isconfirmed
+    label.new(bar_index, high * 1.001, "⚠️ " + str.tostring(hiddenSignals) + " HIDDEN TRADES DETECTED!\nWin Rate Accuracy Compromised", 
+             color=color.red, style=label.style_label_down, textcolor=color.white, size=size.large)

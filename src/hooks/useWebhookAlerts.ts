@@ -224,9 +224,9 @@ export const useWebhookAlerts = () => {
         return false;
       }
 
-      // Update the position sizing node for this alert's group
+      // Update the GLOBAL position sizing node (all pairs share one W-L sequence)
       try {
-        const groupKey = getGroupKeyForSymbol(updatedAlert.symbol);
+        const groupKey = 'GLOBAL';
         const currentNode = await getCurrentNode(groupKey);
         const nextNode = advanceNode(currentNode, outcome);
         await upsertNode(groupKey, nextNode);

@@ -2,7 +2,7 @@ import { supabase } from '../lib/supabase';
 import { TradingAlert } from '../types/alert';
 import { Database } from '../lib/database.types';
 import { AlertParsingService } from './alertParsingService';
-import { getGroupKeyForSymbol, getCurrentNode, getRiskPercentForNode, advanceNode, upsertNode } from './positionSizingService';
+import { getCurrentNode, getRiskPercentForNode } from './positionSizingService';
 
 type AlertRow = Database['public']['Tables']['trading_alerts']['Row'];
 type AlertInsert = Database['public']['Tables']['trading_alerts']['Insert'];
@@ -98,9 +98,14 @@ export class AlertService {
   // Create a new alert
   static async createAlert(alert: Omit<TradingAlert, 'timestamp'>): Promise<{ data: TradingAlert | null; error: string | null }> {
     try {
-      // Assign dynamic risk% based on current node for symbol group
-      // Override all received alerts to 0.65% as requested
-      const riskPercent = (0.65).toFixed(2);
+      // Read risk% from GLOBAL position_sizing_state (matches backend mode)
+      let riskPercent = '0.65';
+      try {
+        const node = await getCurrentNode('GLOBAL');
+        riskPercent = getRiskPercentForNode(node).toFixed(2);
+      } catch {
+        console.warn('Failed to read position sizing state, using default 0.65%');
+      }
 
       const insertData = mapAlertToInsert({ ...alert, risk: riskPercent, outcome: undefined });
       

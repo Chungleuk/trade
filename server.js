@@ -197,14 +197,33 @@ app.post('/mt5/heartbeat', (req, res) => {
   });
 });
 
-// Signal acknowledgment endpoint
-app.post('/signals/ack', (req, res) => {
+// Signal acknowledgment endpoint - marks alert as completed in Supabase
+app.post('/signals/ack', async (req, res) => {
   console.log('Signal acknowledgment received:', req.body);
+  const { signalId, status: ackStatus } = req.body;
+
+  if (signalId && (ackStatus === 'executed' || ackStatus === 'failed')) {
+    try {
+      const newStatus = ackStatus === 'executed' ? 'completed' : 'stopped';
+      const { error } = await supabase
+        .from('trading_alerts')
+        .update({ status: newStatus })
+        .eq('alert_id', signalId);
+      if (error) {
+        console.error('Failed to update alert status:', error);
+      } else {
+        console.log(`Alert ${signalId} status → ${newStatus}`);
+      }
+    } catch (err) {
+      console.error('Error updating alert status:', err);
+    }
+  }
+
   res.json({ 
     status: 'acknowledged', 
     message: 'Signal status updated',
     timestamp: new Date().toISOString(),
-    signalId: req.body.signalId || 'unknown'
+    signalId: signalId || 'unknown'
   });
 });
 
@@ -241,32 +260,41 @@ function advanceNode(currentNode, outcome) {
 app.post('/mt5/trade-outcome', async (req, res) => {
   console.log('Trade outcome received:', req.body);
   
-  const { ticket, outcome, symbol, closePrice, closeTime } = req.body;
-  
-  try {
-    const groupKey = POSITION_SIZING_MODE === 'per_pair'
-      ? (symbol || 'UNKNOWN').toUpperCase()
-      : 'GLOBAL';
-    const { data: state } = await supabase
-      .from('position_sizing_state')
-      .select('*')
-      .eq('group_key', groupKey)
-      .maybeSingle();
-    
-    const currentNode = state?.current_node || 'Start';
-    const nextNode = advanceNode(currentNode, outcome);
-    
-    const { error: upsertError } = await supabase
-      .from('position_sizing_state')
-      .upsert({ group_key: groupKey, current_node: nextNode }, { onConflict: 'group_key' });
-    
-    if (upsertError) {
-      console.error('Failed to update position_sizing_state:', upsertError);
-    } else {
-      console.log(`Position sizing [${POSITION_SIZING_MODE}]: ${symbol} ${outcome} → ${currentNode} → ${nextNode} (${groupKey})`);
+  const { ticket, outcome, symbol, closePrice, closeTime, hk_shutdown } = req.body;
+
+  if (!outcome || (outcome !== 'win' && outcome !== 'loss')) {
+    console.error(`Invalid outcome: "${outcome}" for ticket ${ticket}`);
+    return res.status(400).json({ error: 'Invalid outcome, must be "win" or "loss"' });
+  }
+
+  if (hk_shutdown) {
+    console.log(`HK shutdown close: ticket ${ticket} (${symbol}) — position sizing NOT updated`);
+  } else {
+    try {
+      const groupKey = POSITION_SIZING_MODE === 'per_pair'
+        ? (symbol || 'UNKNOWN').toUpperCase()
+        : 'GLOBAL';
+      const { data: state } = await supabase
+        .from('position_sizing_state')
+        .select('*')
+        .eq('group_key', groupKey)
+        .maybeSingle();
+      
+      const currentNode = state?.current_node || 'Start';
+      const nextNode = advanceNode(currentNode, outcome);
+      
+      const { error: upsertError } = await supabase
+        .from('position_sizing_state')
+        .upsert({ group_key: groupKey, current_node: nextNode }, { onConflict: 'group_key' });
+      
+      if (upsertError) {
+        console.error('Failed to update position_sizing_state:', upsertError);
+      } else {
+        console.log(`Position sizing [${POSITION_SIZING_MODE}]: ${symbol} ${outcome} → ${currentNode} → ${nextNode} (${groupKey})`);
+      }
+    } catch (err) {
+      console.error('Error updating position sizing:', err);
     }
-  } catch (err) {
-    console.error('Error updating position sizing:', err);
   }
   
   console.log(`Trade ${ticket} (${symbol}) marked as ${outcome} at ${closePrice}`);

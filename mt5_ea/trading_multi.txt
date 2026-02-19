@@ -1,0 +1,888 @@
+//@version=6
+strategy('VIDYA + Turtle Breakout Strategy v4.0', 
+     overlay=true, 
+     max_lines_count=500, 
+     max_labels_count=500, 
+     precision=4,
+     default_qty_type=strategy.cash, 
+     default_qty_value=10000, 
+     initial_capital=100000,
+     commission_type=strategy.commission.percent, 
+     commission_value=0.1, 
+     slippage=1)
+
+// ──────────────────────── UI Groups ────────────────────────
+var string G_VIDYA = "VIDYA Settings"
+var string G_VOL = "Volume Pressure"
+var string G_VISUAL = "Visual Settings"
+var string G_SIGNAL = "Signal Settings"
+var string G_RISK = "Risk Management"
+var string G_ADV = "Advanced Filters"
+var string G_TURTLE = "Turtle Breakout Strategy"
+
+// ──────────────────────── Pair Identification ────────────────────────
+cleanSymbol() =>
+    symstr = syminfo.ticker
+    if str.contains(symstr, ":")
+        str.replace_all(symstr, "^.*:", "")
+    else
+        symstr
+
+string current_symbol = cleanSymbol()
+
+// ──────────────────────── Pair-Specific Settings ────────────────────────
+getPairSettings() =>
+    switch current_symbol
+        "XAUUSD" => [18, 3.0, 22, 1.8, 14, 0.002, 55]
+        "EURUSD" => [15, 2.0, 14, 1.3, 14, 0.0005, 50]
+        "USDJPY" => [25, 2.0, 18, 1.2, 12, 0.001, 50]
+        "GBPUSD" => [16, 2.5, 16, 1.4, 14, 0.0006, 50]
+        "AUDUSD" => [14, 2.2, 14, 1.1, 13, 0.0004, 45]
+        "NZDUSD" => [14, 2.5, 14, 1.1, 13, 0.0004, 45]
+        "USDCHF" => [16, 2.0, 15, 1.2, 14, 0.0005, 50]
+        "USDCAD" => [16, 2.0, 15, 1.2, 14, 0.0005, 50]
+        => [18, 1.8, 14, 1.0, 14, 0.0004, 50]
+
+[volMA, thresholdMult, lookbackPeriod, minBreakoutSize, atrPeriod, minAtrFilter, maLength] = getPairSettings()
+
+// ──────────────────────── Key Level Variables ────────────────────────
+var float lastKeyResistance = na
+var float lastKeySupport = na
+
+// ──────────────────── Core Functions ────────────────────
+calculateRR(bool isBuy, float entry, float target, float stop) =>
+    if isBuy
+        risk = entry - stop
+        reward = target - entry
+        reward / math.max(0.0001, risk)
+    else
+        risk = stop - entry
+        reward = entry - target
+        reward / math.max(0.0001, risk)
+
+getStopPrice(bool isBuy, float entry) =>
+    float atr_value = ta.atr(atrPeriod)
+    swingLow = ta.lowest(low, 5)
+    swingHigh = ta.highest(high, 5)
+    swingLevel = isBuy ? swingLow : swingHigh
+    float atrStop = na
+    float keyStop = na
+    
+    if isBuy
+        atrStop := entry - atr_value * 1.7
+        keyStop := na(lastKeySupport) ? atrStop : math.max(lastKeySupport, atrStop)
+        math.max(swingLevel, keyStop)
+    else
+        atrStop := entry + atr_value * 1.7
+        keyStop := na(lastKeyResistance) ? atrStop : math.min(lastKeyResistance, atrStop)
+        math.min(swingLevel, keyStop)
+
+// ────────────────────────── Trade ID Generation ──────────────────────────
+var int tradeDay = na
+var int dailyTradeCount = 0
+
+getTradeID() =>
+    today = year * 10000 + month * 100 + dayofmonth
+    id = str.tostring(today) + "-" + str.format("{0,number,000000}", dailyTradeCount + 1)
+    id
+
+// ──────────────────────── Pair Type Identification ────────────────────────
+string pair = syminfo.ticker
+bool isForex = str.contains(pair, "USD") or str.contains(pair, "JPY") or str.contains(pair, "EUR") or 
+              str.contains(pair, "GBP") or str.contains(pair, "AUD") or str.contains(pair, "NZD") or 
+              str.contains(pair, "CAD") or str.contains(pair, "CHF")
+
+// ──────────────────────── Price Formatting Function ────────────────────────
+formatPrice(float price) =>
+    if isForex
+        str.tostring(price, "#.#####")
+    else
+        str.tostring(price, "#.##")
+
+// ──────────────────────── Previous Day's Levels ────────────────────────
+float prevDayHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+float prevDayLow = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+float midLevel = na(prevDayHigh) or na(prevDayLow) ? na : (prevDayHigh + prevDayLow) / 2
+
+plot(midLevel, "Mid Level", color=color.new(color.yellow, 0), linewidth=2, style=plot.style_linebr)
+
+// ──────────────────────── Key Level Detection ────────────────────────
+int leftBars = 10
+int rightBars = 10
+float swingHigh = ta.pivothigh(leftBars, rightBars)
+float swingLow = ta.pivotlow(leftBars, rightBars)
+
+if not na(swingHigh)
+    lastKeyResistance := swingHigh
+if not na(swingLow)
+    lastKeySupport := swingLow
+
+plot(not na(lastKeyResistance) ? lastKeyResistance : na, title="Resistance", color=color.new(color.orange, 30), linewidth=2, style=plot.style_circles)
+plot(not na(lastKeySupport) ? lastKeySupport : na, title="Support", color=color.new(color.blue, 30), linewidth=2, style=plot.style_circles)
+
+// ──────────────────────── Input Settings ────────────────────────
+// VIDYA Settings
+int vidya_length = input.int(8, 'VIDYA Length', minval=1, group=G_VIDYA)
+int vidya_momentum = input.int(14, 'VIDYA Momentum', minval=1, group=G_VIDYA)
+float band_distance = input.float(1.8, 'Band Distance', step=0.1, minval=0.1, group=G_VIDYA)
+int vidya_smoothing = input.int(10, 'VIDYA Smoothing', minval=1, group=G_VIDYA)
+float source = input.source(close, 'Price Source', group=G_VIDYA)
+
+// Visual Settings
+color up_trend_color = input.color(color.new(#20eab8, 80), 'Uptrend', group=G_VISUAL)
+color down_trend_color = input.color(color.new(#ee3f79, 80), 'Downtrend', group=G_VISUAL)
+bool use_shadow = input.bool(true, 'Use Fill Shadow', group=G_VISUAL)
+int band_width = input.int(2, 'VIDYA Line Width', minval=1, maxval=4, group=G_VISUAL)
+bool show_dashboard = input.bool(true, "Show Statistics Dashboard", group=G_VISUAL)
+
+// Volume Pressure Settings
+int signal_smoothing = input.int(5, "Signal Smoothing", minval=1, group=G_VOL)
+float min_volume_change = input.float(25.0, "Min Volume Change (%)", minval=0.1, step=0.1, group=G_VOL)
+float vol_threshold_multiplier = input.float(1.8, "Volume Threshold", minval=0.1, step=0.1, group=G_VOL)
+int vol_ma_length = input.int(18, "Volume MA Length", minval=1, group=G_VOL)
+
+// Signal Settings
+int min_bars_between_signals = input.int(6, "Min Bars Between Signals", minval=1, maxval=20, group=G_SIGNAL)
+bool show_labels = input.bool(true, "Show Signal Labels", group=G_SIGNAL)
+bool show_trade_details = input.bool(true, "Show Trade Lines", group=G_SIGNAL)
+int lines_duration = input.int(20, "Lines Duration (bars)", minval=5, maxval=100, group=G_SIGNAL)
+int lines_transparency = input.int(50, "Lines Transparency", minval=0, maxval=100, group=G_SIGNAL)
+
+// Trade Results Settings
+bool show_trade_results = input.bool(true, "Show WIN/LOSS Marks", group=G_SIGNAL)
+int result_label_size = input.int(3, "Result Label Size", options=[1, 2, 3, 4, 5], group=G_SIGNAL)
+int result_label_offset = input.int(15, "Result Label Offset", minval=1, maxval=50, group=G_SIGNAL)
+color win_color = input.color(color.green, "WIN Color", group=G_SIGNAL)
+color loss_color = input.color(color.red, "LOSS Color", group=G_SIGNAL)
+
+// Advanced Filter Settings
+bool volumeConfirmation = input.bool(true, "Require Volume Confirmation", group=G_ADV)
+float minVolumeIncrease = input.float(1.5, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.1, group=G_ADV)
+bool useTrendFilter = input.bool(true, "Use Trend Filter", group=G_ADV)
+bool useVolatilityFilter = input.bool(true, "Use Volatility Filter", group=G_ADV)
+int minVolatilityPercentile = input.int(35, "Min Volatility Percentile", minval=0, maxval=100, group=G_ADV)
+int volatilityPeriod = input.int(20, "Volatility Period", minval=5, group=G_ADV)
+int consecutiveBarsRequired = input.int(3, "Consecutive Bars Required", minval=1, maxval=5, group=G_ADV)
+
+// Apply pair-specific parameters
+vol_threshold_multiplier := thresholdMult
+vol_ma_length := volMA
+
+// ──────────────────── Consolidation Detection Settings ────────────────────
+int consolidationPeriod = input.int(15, "Consolidation Period (bars)", minval=1, group=G_RISK)
+float consolidationThreshold = input.float(0.4, "Consolidation Threshold (ATR multiple)", minval=0.1, step=0.1, group=G_RISK)
+
+// ──────────────────── Risk Management Settings ────────────────────
+float rrRatio = input.float(1.1, "Risk Reward Ratio", minval=1.0, maxval=5.0, step=0.1, group=G_RISK)
+float maxRiskPercent = input.float(1.0, "Max Risk % per Trade", minval=0.1, maxval=5.0, step=0.1, group=G_RISK)
+int maxTradeDuration = input.int(50, "Max Trade Duration (bars)", minval=5, maxval=100, group=G_RISK)
+
+// ──────────────────── Turtle Breakout Strategy Settings ────────────────────
+bool useTurtleStrategy = input.bool(true, "Enable Turtle Breakout Strategy", group=G_TURTLE, tooltip="Enable Donchian Channel breakout system")
+string signalMode = input.string("Combined", "Signal Mode", options=["VIDYA Only", "Turtle Only", "Combined"], group=G_TURTLE, tooltip="VIDYA Only: Use only VIDYA signals\nTurtle Only: Use only Turtle breakouts\nCombined: Require both signals")
+int turtleShortPeriod = input.int(20, "Short Donchian Period (20)", minval=5, maxval=100, group=G_TURTLE, tooltip="Early trend detection - 20 period breakout")
+int turtleLongPeriod = input.int(55, "Long Donchian Period (55)", minval=20, maxval=200, group=G_TURTLE, tooltip="Major trend detection - 55 period breakout")
+bool useLongPeriod = input.bool(false, "Use Long Period (55) Breakout", group=G_TURTLE, tooltip="Enable 55-period breakout for major trends")
+float turtleStopMultiplier = input.float(2.0, "ATR Stop Multiplier (N)", minval=0.5, maxval=5.0, step=0.1, group=G_TURTLE, tooltip="Stop loss = Entry ± (ATR × Multiplier). Original Turtles used 2x N")
+bool useOppositeBreakoutExit = input.bool(true, "Exit on Opposite Breakout", group=G_TURTLE, tooltip="Exit long on lower channel break, exit short on upper channel break")
+bool showDonchianChannels = input.bool(true, "Show Donchian Channels", group=G_TURTLE)
+bool enablePyramiding = input.bool(false, "Enable Pyramiding", group=G_TURTLE, tooltip="Add positions as trend strengthens (advanced)")
+int pyramidSpacing = input.int(5, "Pyramid Spacing (bars)", minval=1, maxval=20, group=G_TURTLE, tooltip="Minimum bars between pyramid entries")
+
+// ──────────────────────── Core Calculation Logic ────────────────────────
+float atr_value = ta.atr(atrPeriod)
+float avgVolume = ta.sma(volume, 20)
+
+// Volatility Percentile Calculation
+float volatilityPercentile = ta.percentrank(atr_value, volatilityPeriod) * 100
+
+// VIDYA Calculation Function
+vidya_calc(float src, int len, int mom, int smooth) =>
+    momentum = ta.change(src)
+    sum_pos = math.sum(momentum >= 0 ? momentum : 0.0, mom)
+    sum_neg = math.sum(momentum >= 0 ? 0.0 : -momentum, mom)
+    abs_cmo = math.abs(100 * (sum_pos - sum_neg) / (sum_pos + sum_neg))
+    alpha = 2 / (len + 1)
+    var float vidya_val = src
+    vidya_val := alpha * abs_cmo / 100 * src + (1 - alpha * abs_cmo / 100) * nz(vidya_val[1])
+    ta.sma(vidya_val, smooth)
+
+// State Variables
+var bool is_trend_up = false
+var int consecutiveBullishBars = 0
+var int consecutiveBearishBars = 0
+
+// Main VIDYA Calculation
+float vidya_value = vidya_calc(source, vidya_length, vidya_momentum, vidya_smoothing)
+float upper_band = vidya_value + atr_value * band_distance
+float lower_band = vidya_value - atr_value * band_distance
+
+// Trend Determination
+if ta.crossover(source, upper_band)
+    is_trend_up := true
+if ta.crossunder(source, lower_band)
+    is_trend_up := false
+
+// Band Calculation
+float smoothed_value = is_trend_up ? lower_band : upper_band
+color trend_color = is_trend_up ? up_trend_color : down_trend_color
+
+// Consecutive Bars Count
+if close > open
+    consecutiveBullishBars := consecutiveBullishBars + 1
+    consecutiveBearishBars := 0
+else if close < open
+    consecutiveBearishBars := consecutiveBearishBars + 1
+    consecutiveBullishBars := 0
+else
+    consecutiveBullishBars := 0
+    consecutiveBearishBars := 0
+
+// ──────────────────── Volume Pressure System ────────────────────
+float upVol = volume * (close > open ? 1 : 0)
+float downVol = volume * (close < open ? 1 : 0)
+float deltaVol = upVol - downVol
+
+smoothedVol = ta.ema(deltaVol, vol_ma_length)
+volumeSMA = ta.sma(volume, vol_ma_length)
+float volRatio = volumeSMA != 0 ? (smoothedVol / volumeSMA) * 100 : 0
+float signalLine = ta.ema(volRatio, signal_smoothing)
+float threshold = vol_threshold_multiplier
+
+bool is_strong_buy = volRatio > threshold and volRatio > signalLine and volRatio > min_volume_change
+bool is_strong_sell = volRatio < -threshold and volRatio < signalLine and volRatio < -min_volume_change
+bool is_trend_confirmed = (is_strong_buy and is_trend_up) or (is_strong_sell and not is_trend_up)
+
+// ──────────────────── Trade Management Variables ────────────────────
+var float buy_entry = na
+var float buy_target = na
+var float buy_stop = na
+
+var float sell_entry = na
+var float sell_target = na
+var float sell_stop = na
+
+// Trade Statistics Variables
+var int totalTrades = 0
+var int totalWins = 0
+var int totalLosses = 0
+var int currentWinStreak = 0
+var int currentLossStreak = 0
+var int maxWinStreak = 0
+var int maxLossStreak = 0
+var int maxWinStreakTime = na
+var int maxLossStreakTime = na
+var int lastTradeCloseBar = 0
+var string lastTradeID = ""
+
+// Fixed account size for calculations
+float accountSize = 10000
+float maxRiskAmount = accountSize * maxRiskPercent / 100
+
+// ──────────────────── Turtle Breakout Strategy Functions ────────────────────
+// Turtle Stop Loss Calculation (2x N where N = ATR)
+getTurtleStop(bool isBuy, float entry) =>
+    float n = atr_value  // N = Average True Range
+    if isBuy
+        entry - (n * turtleStopMultiplier)  // Stop below entry
+    else
+        entry + (n * turtleStopMultiplier)  // Stop above entry
+
+// Turtle Target (using RR ratio)
+getTurtleTarget(bool isBuy, float entry, float stop) =>
+    float risk = math.abs(entry - stop)
+    if isBuy
+        entry + (risk * rrRatio)
+    else
+        entry - (risk * rrRatio)
+
+// ──────────────────── Turtle Breakout Calculations ────────────────────
+// Donchian Channels (Turtle Breakout System)
+float donchianShortHigh = ta.highest(high[1], turtleShortPeriod)  // 20-period high
+float donchianShortLow = ta.lowest(low[1], turtleShortPeriod)      // 20-period low
+float donchianLongHigh = ta.highest(high[1], turtleLongPeriod)     // 55-period high
+float donchianLongLow = ta.lowest(low[1], turtleLongPeriod)        // 55-period low
+
+// Turtle Breakout Signals
+bool turtleShortBreakoutUp = close > donchianShortHigh
+bool turtleShortBreakoutDown = close < donchianShortLow
+bool turtleLongBreakoutUp = useLongPeriod ? close > donchianLongHigh : false
+bool turtleLongBreakoutDown = useLongPeriod ? close < donchianLongLow : false
+
+// Combined Turtle breakout (use short period, or long if enabled)
+bool turtleBuyBreakout = turtleShortBreakoutUp or turtleLongBreakoutUp
+bool turtleSellBreakout = turtleShortBreakoutDown or turtleLongBreakoutDown
+
+// Buy/Sell Level Calculation
+// Call getStopPrice on every bar for consistency (Pine Script requirement)
+float currentBuyStop = getStopPrice(true, close)
+float currentSellStop = getStopPrice(false, close)
+
+// VIDYA-based levels
+if is_strong_buy and is_trend_up
+    buy_entry := close
+    buy_stop := currentBuyStop
+    riskDistance = close - buy_stop
+    buy_target := close + riskDistance * rrRatio
+
+if is_strong_sell and not is_trend_up
+    sell_entry := close
+    sell_stop := currentSellStop
+    riskDistance = sell_stop - close
+    sell_target := close - riskDistance * rrRatio
+
+// Turtle-based levels will be calculated after signal definitions
+
+// Plot Donchian Channels (must be at global scope, not inside if blocks)
+plot(showDonchianChannels ? donchianShortHigh : na, "Donchian Short High", color=color.new(color.blue, 70), linewidth=1)
+plot(showDonchianChannels ? donchianShortLow : na, "Donchian Short Low", color=color.new(color.blue, 70), linewidth=1)
+plot(showDonchianChannels and useLongPeriod ? donchianLongHigh : na, "Donchian Long High", color=color.new(color.orange, 70), linewidth=2)
+plot(showDonchianChannels and useLongPeriod ? donchianLongLow : na, "Donchian Long Low", color=color.new(color.orange, 70), linewidth=2)
+
+// ──────────────────── Consolidation Detection ────────────────────
+float consolidationHigh = ta.highest(high, consolidationPeriod)
+float consolidationLow = ta.lowest(low, consolidationPeriod)
+float consolidationRange = consolidationHigh - consolidationLow
+float consolidationATR = atr_value * consolidationThreshold
+bool isConsolidating = not na(consolidationATR) and consolidationRange < consolidationATR
+
+// ──────────────────── Advanced Breakout Detection (VIDYA) ────────────────────
+float highestHigh = ta.highest(high[1], lookbackPeriod)
+float lowestLow = ta.lowest(low[1], lookbackPeriod)
+
+float minBreakoutAmount = atr_value * minBreakoutSize / 100
+bool significantBreakoutUp = (high - highestHigh) >= minBreakoutAmount
+bool significantBreakoutDown = (low - lowestLow) <= -minBreakoutAmount
+bool validAtrCondition = not na(atr_value) and atr_value >= minAtrFilter
+
+// Volume confirmation
+bool volumeIncreaseCondition = not volumeConfirmation or volume > avgVolume * minVolumeIncrease
+
+// Price Action Confirmation
+isValidBullishSignal() =>
+    close > ta.highest(high, 3)[1]
+
+isValidBearishSignal() =>
+    close < ta.lowest(low, 3)[1]
+
+bool isValidBullish = isValidBullishSignal()
+bool isValidBearish = isValidBearishSignal()
+
+// ──────────────────── Signal Control ────────────────────
+var bool inTrade = false
+var int lastTradeBar = 0
+var int lastSignalBar = 0
+var bool tradeCompleted = true
+var bool tradeSuccess = false
+var float currentEntry = na
+var float currentTarget = na
+var float currentStop = na
+var bool isBuyTrade = false
+var int entryBarIndex = 0
+
+// Signal control
+var int lastLabelBar = 0
+
+bool minBarsPassed = (bar_index - lastLabelBar >= min_bars_between_signals) and (bar_index - lastSignalBar >= min_bars_between_signals)
+bool midLevelAvailable = not na(midLevel)
+
+// Consecutive bars condition
+bool consecutiveBarsBuy = consecutiveBullishBars >= consecutiveBarsRequired
+bool consecutiveBarsSell = consecutiveBearishBars >= consecutiveBarsRequired
+
+// Volatility condition
+bool volatilityCondition = not useVolatilityFilter or (not na(volatilityPercentile)) and volatilityPercentile >= minVolatilityPercentile
+
+// VIDYA Signal Conditions
+bool vidyaBuySignal = 
+  not inTrade and 
+  is_trend_confirmed and 
+  is_strong_buy and 
+  minBarsPassed and 
+  not isConsolidating and 
+  midLevelAvailable and 
+  close > midLevel and
+  significantBreakoutUp and
+  validAtrCondition and
+  volumeIncreaseCondition and
+  consecutiveBarsBuy and
+  volatilityCondition and
+  isValidBullish
+
+bool vidyaSellSignal = 
+  not inTrade and 
+  is_trend_confirmed and 
+  is_strong_sell and 
+  minBarsPassed and 
+  not isConsolidating and 
+  midLevelAvailable and 
+  close < midLevel and
+  significantBreakoutDown and
+  validAtrCondition and
+  volumeIncreaseCondition and
+  consecutiveBarsSell and
+  volatilityCondition and
+  isValidBearish
+
+// Turtle Signal Conditions (simpler - just breakout with basic filters)
+bool turtleBuySignal = 
+  not inTrade and 
+  useTurtleStrategy and
+  turtleBuyBreakout and
+  minBarsPassed and
+  validAtrCondition and
+  volumeIncreaseCondition
+
+bool turtleSellSignal = 
+  not inTrade and 
+  useTurtleStrategy and
+  turtleSellBreakout and
+  minBarsPassed and
+  validAtrCondition and
+  volumeIncreaseCondition
+
+// Combined Signal Logic based on signalMode
+bool showBuySignal = 
+  signalMode == "VIDYA Only" ? vidyaBuySignal :
+  signalMode == "Turtle Only" ? turtleBuySignal :
+  (vidyaBuySignal and turtleBuySignal)  // Combined: require both
+
+bool showSellSignal = 
+  signalMode == "VIDYA Only" ? vidyaSellSignal :
+  signalMode == "Turtle Only" ? turtleSellSignal :
+  (vidyaSellSignal and turtleSellSignal)  // Combined: require both
+
+// ──────────────────── Turtle-based Level Calculation (after signals) ────────────────────
+// Only calculate Turtle levels, don't override VIDYA levels unless in Turtle Only mode
+if turtleBuyBreakout and useTurtleStrategy and signalMode == "Turtle Only"
+    buy_entry := close
+    buy_stop := getTurtleStop(true, close)
+    buy_target := getTurtleTarget(true, close, buy_stop)
+else if turtleBuyBreakout and useTurtleStrategy and signalMode == "Combined" and vidyaBuySignal
+    // In combined mode, use Turtle stop (more conservative) but keep VIDYA entry/target
+    float turtleStop = getTurtleStop(true, close)
+    // Use the more conservative stop (further from entry)
+    if na(buy_stop) or turtleStop > buy_stop
+        buy_stop := turtleStop
+    // Recalculate target based on new stop if needed
+    if not na(buy_stop)
+        riskDistance = close - buy_stop
+        buy_target := close + riskDistance * rrRatio
+
+if turtleSellBreakout and useTurtleStrategy and signalMode == "Turtle Only"
+    sell_entry := close
+    sell_stop := getTurtleStop(false, close)
+    sell_target := getTurtleTarget(false, close, sell_stop)
+else if turtleSellBreakout and useTurtleStrategy and signalMode == "Combined" and vidyaSellSignal
+    // In combined mode, use Turtle stop (more conservative) but keep VIDYA entry/target
+    float turtleStop = getTurtleStop(false, close)
+    // Use the more conservative stop (further from entry)
+    if na(sell_stop) or turtleStop < sell_stop
+        sell_stop := turtleStop
+    // Recalculate target based on new stop if needed
+    if not na(sell_stop)
+        riskDistance = sell_stop - close
+        sell_target := close - riskDistance * rrRatio
+
+// ──────────────────── Trade Line Variables (Global Scope) ────────────────────
+var line entryLine = na
+var line targetLine = na
+var line stopLine = na
+
+// ──────────────────── Pyramiding Variables ────────────────────
+var int pyramidCount = 0
+var int lastPyramidBar = 0
+var float pyramidEntryPrice = na
+
+// ──────────────────── Trade Execution Logic ────────────────────
+if inTrade
+    targetHit = isBuyTrade ? (high >= currentTarget) : (low <= currentTarget)
+    stopHit = isBuyTrade ? (low <= currentStop) : (high >= currentStop)
+    durationExpired = (bar_index - entryBarIndex) >= maxTradeDuration
+    
+    // Turtle Opposite Breakout Exit
+    bool oppositeBreakoutExit = false
+    if useOppositeBreakoutExit and useTurtleStrategy
+        if isBuyTrade
+            // Exit long on lower channel break
+            oppositeBreakoutExit := close < donchianShortLow
+        else
+            // Exit short on upper channel break
+            oppositeBreakoutExit := close > donchianShortHigh
+    
+    if targetHit or stopHit or durationExpired or oppositeBreakoutExit
+        strategy.close_all()
+        tradeCompleted := true
+        inTrade := false
+        tradeSuccess := targetHit
+        
+        // Update trade statistics
+        totalTrades := totalTrades + 1
+        if tradeSuccess
+            totalWins := totalWins + 1
+            currentWinStreak := currentWinStreak + 1
+            currentLossStreak := 0
+            if currentWinStreak > maxWinStreak
+                maxWinStreak := currentWinStreak
+                maxWinStreakTime := time
+        else
+            totalLosses := totalLosses + 1
+            currentLossStreak := currentLossStreak + 1
+            currentWinStreak := 0
+            if currentLossStreak > maxLossStreak
+                maxLossStreak := currentLossStreak
+                maxLossStreakTime := time
+        
+        lastTradeCloseBar := bar_index
+        
+        // Reset pyramiding variables
+        pyramidCount := 0
+        lastPyramidBar := 0
+        pyramidEntryPrice := na
+        
+        if show_trade_results
+            pointOffset = result_label_offset * syminfo.mintick
+            if tradeSuccess
+                label.new(bar_index, 
+                         isBuyTrade ? high + pointOffset : low - pointOffset, 
+                         "WIN", 
+                         style=isBuyTrade ? label.style_label_down : label.style_label_up,
+                         color=color.new(win_color, 0), 
+                         textcolor=color.white, 
+                         size=result_label_size == 1 ? size.tiny : 
+                              result_label_size == 2 ? size.small : 
+                              result_label_size == 3 ? size.normal : 
+                              result_label_size == 4 ? size.large : size.huge,
+                         yloc=yloc.price,
+                         textalign=text.align_center)
+            else
+                label.new(bar_index, 
+                         isBuyTrade ? low - pointOffset : high + pointOffset, 
+                         "LOSS", 
+                         style=isBuyTrade ? label.style_label_up : label.style_label_down,
+                         color=color.new(loss_color, 0), 
+                         textcolor=color.white, 
+                         size=result_label_size == 1 ? size.tiny : 
+                              result_label_size == 2 ? size.small : 
+                              result_label_size == 3 ? size.normal : 
+                              result_label_size == 4 ? size.large : size.huge,
+                         yloc=yloc.price,
+                         textalign=text.align_center)
+
+// ──────────────────── Pyramiding Logic (Turtle Strategy) ────────────────────
+if inTrade and enablePyramiding and useTurtleStrategy
+    bool canPyramid = (bar_index - lastPyramidBar) >= pyramidSpacing
+    bool priceMovedFavorably = false
+    bool newBreakoutInDirection = false
+    
+    if isBuyTrade
+        // For long trades: price should be above entry, and new breakout above channel
+        priceMovedFavorably := close > currentEntry
+        newBreakoutInDirection := turtleBuyBreakout and close > donchianShortHigh
+    else
+        // For short trades: price should be below entry, and new breakout below channel
+        priceMovedFavorably := close < currentEntry
+        newBreakoutInDirection := turtleSellBreakout and close < donchianShortLow
+    
+    if canPyramid and priceMovedFavorably and newBreakoutInDirection
+        // Add pyramid position
+        pyramidCount := pyramidCount + 1
+        lastPyramidBar := bar_index
+        pyramidEntryPrice := close
+        
+        if isBuyTrade
+            strategy.entry("Buy_Pyramid_" + str.tostring(pyramidCount), strategy.long)
+            // Update stop to breakeven or trailing stop
+            float newStop = getTurtleStop(true, close)
+            strategy.exit("Exit Buy_Pyramid_" + str.tostring(pyramidCount), "Buy_Pyramid_" + str.tostring(pyramidCount), stop=newStop)
+        else
+            strategy.entry("Sell_Pyramid_" + str.tostring(pyramidCount), strategy.short)
+            float newStop = getTurtleStop(false, close)
+            strategy.exit("Exit Sell_Pyramid_" + str.tostring(pyramidCount), "Sell_Pyramid_" + str.tostring(pyramidCount), stop=newStop)
+
+// Process new signals
+if (showBuySignal or showSellSignal) and not inTrade
+    // Update daily counter
+    today = year * 10000 + month * 100 + dayofmonth
+    if na(tradeDay) or today != tradeDay
+        tradeDay := today
+        dailyTradeCount := 0
+    
+    dailyTradeCount := dailyTradeCount + 1
+    lastTradeID := getTradeID()
+    
+    if showBuySignal
+        inTrade := true
+        tradeCompleted := false
+        currentEntry := buy_entry
+        currentTarget := buy_target
+        currentStop := buy_stop
+        isBuyTrade := true
+        entryBarIndex := bar_index
+        lastTradeBar := bar_index
+        lastLabelBar := bar_index
+        lastSignalBar := bar_index
+        
+        strategy.entry("Buy", strategy.long)
+        strategy.exit("Exit Buy", "Buy", stop=currentStop, limit=currentTarget)
+        
+        // Fixed alert formatting with proper price formatting
+        alertMsg = "BUY: " + syminfo.ticker + " @ " + formatPrice(buy_entry) + 
+                  " | Target: " + formatPrice(buy_target) + 
+                  " | Stop: " + formatPrice(buy_stop) + 
+                  " | RR: " + str.tostring(rrRatio, "#.##") + ":1\n" +
+                  "ID: " + lastTradeID
+        alert(alertMsg)
+    
+    if showSellSignal
+        inTrade := true
+        tradeCompleted := false
+        currentEntry := sell_entry
+        currentTarget := sell_target
+        currentStop := sell_stop
+        isBuyTrade := false
+        entryBarIndex := bar_index
+        lastTradeBar := bar_index
+        lastLabelBar := bar_index
+        lastSignalBar := bar_index
+        
+        strategy.entry("Sell", strategy.short)
+        strategy.exit("Exit Sell", "Sell", stop=currentStop, limit=currentTarget)
+        
+        // Fixed alert formatting with proper price formatting
+        alertMsg = "SELL: " + syminfo.ticker + " @ " + formatPrice(sell_entry) + 
+                  " | Target: " + formatPrice(sell_target) + 
+                  " | Stop: " + formatPrice(sell_stop) + 
+                  " | RR: " + str.tostring(rrRatio, "#.##") + ":1\n" +
+                  "ID: " + lastTradeID
+        alert(alertMsg)
+
+// Time-Based Exit
+if inTrade and (bar_index - entryBarIndex) >= maxTradeDuration
+    strategy.close_all(comment="Max Duration")
+    inTrade := false
+
+// ──────────────────────── Plotting & Visualization ────────────────────────
+p1 = plot(smoothed_value, "VIDYA Band", color=trend_color, linewidth=band_width)
+p2 = plot(hl2, display=display.none)
+fill(p1, p2, color.new(trend_color, use_shadow ? 80 : 100))
+
+// Plot signals with different colors for Turtle vs VIDYA
+color buySignalColor = signalMode == "Turtle Only" ? color.new(color.orange, 0) : signalMode == "VIDYA Only" ? color.new(color.blue, 100) : color.new(color.blue, 0)
+color sellSignalColor = signalMode == "Turtle Only" ? color.new(color.orange, 0) : signalMode == "VIDYA Only" ? color.new(color.purple, 100) : color.new(color.purple, 0)
+
+plotshape(showBuySignal, title="Buy Signal", location=location.belowbar, 
+         color=buySignalColor, style=shape.triangleup, size=size.normal)
+plotshape(showSellSignal, title="Sell Signal", location=location.abovebar, 
+         color=sellSignalColor, style=shape.triangledown, size=size.normal)
+
+// Plot Turtle breakout markers (different style)
+plotshape(turtleBuyBreakout and useTurtleStrategy and not showBuySignal, title="Turtle Buy Breakout", 
+         location=location.belowbar, color=color.new(color.orange, 50), style=shape.circle, size=size.tiny)
+plotshape(turtleSellBreakout and useTurtleStrategy and not showSellSignal, title="Turtle Sell Breakout", 
+         location=location.abovebar, color=color.new(color.orange, 50), style=shape.circle, size=size.tiny)
+
+if show_labels
+    if showBuySignal
+        rrRatioActual = calculateRR(true, buy_entry, buy_target, buy_stop)
+        
+        buy_text = "▲ BUY\n" +
+                  "Entry: " + formatPrice(buy_entry) + "\n" +
+                  "Target: " + formatPrice(buy_target) + "\n" +
+                  "Stop: " + formatPrice(buy_stop) + "\n" +
+                  "RR: " + str.tostring(rrRatioActual, "#.##") + ":1\n" +
+                  "ID: " + lastTradeID
+        
+        label.new(bar_index, low, buy_text, style=label.style_label_up, 
+             color=color.new(color.blue, 90), textcolor=color.white, size=size.normal,
+             textalign=text.align_center)
+    
+    if showSellSignal
+        rrRatioActual = calculateRR(false, sell_entry, sell_target, sell_stop)
+        
+        sell_text = "▼ SELL\n" +
+                   "Entry: " + formatPrice(sell_entry) + "\n" +
+                   "Target: " + formatPrice(sell_target) + "\n" +
+                   "Stop: " + formatPrice(sell_stop) + "\n" +
+                   "RR: " + str.tostring(rrRatioActual, "#.##") + ":1\n" +
+                   "ID: " + lastTradeID
+        
+        label.new(bar_index, high, sell_text, style=label.style_label_down, 
+             color=color.new(color.purple, 90), textcolor=color.white, size=size.normal,
+             textalign=text.align_center)
+
+// ──────────────────── Trade Line Management ────────────────────
+if show_trade_details and not na(currentEntry)
+    if bar_index - entryBarIndex <= lines_duration
+        color entryColor = isBuyTrade ? color.blue : color.purple
+        
+        // Update entry line
+        line.delete(entryLine)
+        entryLine := line.new(
+             entryBarIndex, currentEntry, bar_index, currentEntry,
+             xloc=xloc.bar_index, extend=extend.right,
+             color=color.new(entryColor, lines_transparency), width=2, style=line.style_solid)
+        
+        // Update target line
+        line.delete(targetLine)
+        targetLine := line.new(
+             entryBarIndex, currentTarget, bar_index, currentTarget,
+             xloc=xloc.bar_index, extend=extend.right,
+             color=color.new(color.green, lines_transparency), width=2, style=line.style_dashed)
+        
+        // Update stop line
+        line.delete(stopLine)
+        stopLine := line.new(
+             entryBarIndex, currentStop, bar_index, currentStop,
+             xloc=xloc.bar_index, extend=extend.right,
+             color=color.new(color.red, lines_transparency), width=2, style=line.style_dashed)
+    else
+        // Clean up lines when duration expires
+        line.delete(entryLine)
+        line.delete(targetLine)
+        line.delete(stopLine)
+
+// ──────────────────────── Status Panel / Dashboard ────────────────────────
+if show_dashboard and barstate.islast
+    // Calculate statistics
+    winRate = totalTrades > 0 ? (totalWins * 100.0) / totalTrades : 0
+    
+    trendStatus = is_trend_up ? "UPTREND ▲" : "DOWNTREND ▼"
+    
+    volumeStatus = "NEUTRAL"
+    if is_strong_buy
+        volumeStatus := "BULLISH"
+    else if volRatio > threshold / 2 and volRatio > signalLine
+        volumeStatus := "MILD BULLISH"
+    else if is_strong_sell
+        volumeStatus := "BEARISH"
+    else if volRatio < -threshold / 2 and volRatio < signalLine
+        volumeStatus := "MILD BEARISH"
+    
+    keyLevelStatus = "No Key Levels"
+    if not na(lastKeyResistance) and not na(lastKeySupport)
+        keyLevelStatus := "R: " + formatPrice(lastKeyResistance) + " | S: " + formatPrice(lastKeySupport)
+    
+    signalStatus = "NONE"
+    color signalColor = color.gray
+    if showBuySignal
+        signalStatus := "BUY"
+        signalColor := color.blue
+    else if showSellSignal
+        signalStatus := "SELL"
+        signalColor := color.purple
+    
+    pairSettings = "Vol MA: " + str.tostring(volMA) + " | Threshold: " + str.tostring(thresholdMult)
+    
+    // Turtle Strategy Status
+    turtleStatus = useTurtleStrategy ? "ON (" + str.tostring(turtleShortPeriod) + "/" + str.tostring(turtleLongPeriod) + ")" : "OFF"
+    signalModeText = "Mode: " + signalMode
+    donchianStatus = "Donchian: " + formatPrice(donchianShortHigh) + " / " + formatPrice(donchianShortLow)
+    if useLongPeriod
+        donchianStatus := donchianStatus + " | Long: " + formatPrice(donchianLongHigh) + " / " + formatPrice(donchianLongLow)
+    
+    tradeDetails = ""
+    float rrActual = na
+    if showBuySignal
+        rrActual := calculateRR(true, buy_entry, buy_target, buy_stop)
+        tradeDetails := "Entry: " + formatPrice(buy_entry) + 
+                      " | Target: " + formatPrice(buy_target) + 
+                      " | Stop: " + formatPrice(buy_stop) +
+                      " | RR: " + str.tostring(rrActual, "#.##") + ":1"
+    else if showSellSignal
+        rrActual := calculateRR(false, sell_entry, sell_target, sell_stop)
+        tradeDetails := "Entry: " + formatPrice(sell_entry) + 
+                      " | Target: " + formatPrice(sell_target) + 
+                      " | Stop: " + formatPrice(sell_stop) +
+                      " | RR: " + str.tostring(rrActual, "#.##") + ":1"
+    
+    currentTradeStatus = "NO ACTIVE TRADE"
+    color tradeStatusColor = color.gray
+    if inTrade
+        currentRR = calculateRR(isBuyTrade, currentEntry, currentTarget, currentStop)
+        currentTradeStatus := (isBuyTrade ? "BUY" : "SELL") + " ACTIVE" + 
+                          "\nEntry: " + formatPrice(currentEntry) + 
+                          "\nTarget: " + formatPrice(currentTarget) + 
+                          "\nStop: " + formatPrice(currentStop) +
+                          "\nRR: " + str.tostring(currentRR, "#.##") + ":1\n" +
+                          "ID: " + lastTradeID
+        tradeStatusColor := isBuyTrade ? color.blue : color.purple
+    
+    tradeResultStatus = "No Recent Trade"
+    color tradeResultColor = color.gray
+    if tradeCompleted and totalTrades > 0
+        if tradeSuccess
+            tradeResultStatus := "Last Trade: WIN ✅"
+            tradeResultColor := color.green
+        else
+            tradeResultStatus := "Last Trade: LOSS ❌"
+            tradeResultColor := color.red
+    
+    sidewaysText = isConsolidating ? "YES" : "NO"
+    rangeText = str.tostring(consolidationRange, "#.##")
+    atrText = str.tostring(consolidationATR, "#.##")
+    consolidationStatus = "Sideways: " + sidewaysText + " (Range: " + rangeText + " < " + atrText + ")"
+    
+    midLevelText = not na(midLevel) ? formatPrice(midLevel) : "N/A"
+    midLevelStatus = "Mid Level: " + midLevelText
+    
+    volatilityStatus = "Volatility: " + str.tostring(volatilityPercentile, "#.#") + "%"
+    consecutiveStatus = "Bull Bars: " + str.tostring(consecutiveBullishBars) + " | Bear Bars: " + str.tostring(consecutiveBearishBars)
+    
+    winStreakTime = not na(maxWinStreakTime) ? str.format("{0,date,yyyy-MM-dd HH:mm}", maxWinStreakTime) : "N/A"
+    lossStreakTime = not na(maxLossStreakTime) ? str.format("{0,date,yyyy-MM-dd HH:mm}", maxLossStreakTime) : "N/A"
+    
+    totalStr = "Trades: " + str.tostring(totalTrades)
+    winsStr = " | Wins: " + str.tostring(totalWins)
+    lossStr = " | Loss: " + str.tostring(totalLosses)
+    winRateStr = " | Win%: " + str.tostring(winRate, "#.##") + "%"
+    statsText = totalStr + winsStr + lossStr + winRateStr
+    
+    // Create and populate dashboard table
+    var table statusTable = table.new(position.top_right, 1, 22, border_width=1)
+    
+    table.cell(statusTable, 0, 0, pair + " Status", 
+         text_color=color.white, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    table.cell(statusTable, 0, 1, trendStatus + " | " + volumeStatus, 
+         text_color=color.white, bgcolor=is_trend_up ? color.new(up_trend_color, 50) : color.new(down_trend_color, 50), text_size=size.small)
+    table.cell(statusTable, 0, 2, "Key Levels: " + keyLevelStatus, 
+         text_color=color.white, bgcolor=color.new(#2b3139, 70), text_size=size.small)
+    table.cell(statusTable, 0, 3, "Signal: " + signalStatus, 
+         text_color=signalColor, bgcolor=color.new(#2b3139, 90), text_size=size.small)
+    table.cell(statusTable, 0, 4, "Turtle: " + turtleStatus + " | " + signalModeText, 
+         text_color=useTurtleStrategy ? color.orange : color.gray, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 5, donchianStatus, 
+         text_color=color.orange, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 6, "Pair Settings: " + pairSettings, 
+         text_color=color.yellow, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 7, tradeDetails, 
+         text_color=color.white, bgcolor=color.new(#2b3139, 80), text_size=size.small)
+    table.cell(statusTable, 0, 8, currentTradeStatus, 
+         text_color=tradeStatusColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 9, tradeResultStatus, 
+         text_color=tradeResultColor, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 10, consolidationStatus, 
+         text_color=isConsolidating ? color.orange : color.gray, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 11, midLevelStatus, 
+         text_color=color.new(color.yellow, 0), bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 12, volatilityStatus, 
+         text_color=volatilityPercentile >= minVolatilityPercentile ? color.green : color.orange, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 13, consecutiveStatus, 
+         text_color=color.silver, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 14, "Max Wins: " + str.tostring(maxWinStreak) + " (as of " + winStreakTime + ")", 
+         text_color=color.green, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 15, "Max Losses: " + str.tostring(maxLossStreak) + " (as of " + lossStreakTime + ")", 
+         text_color=color.red, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 16, "Current: " + str.tostring(currentWinStreak) + "W/" + str.tostring(currentLossStreak) + "L", 
+         text_color=color.white, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 17, statsText, 
+         text_color=winRate >= 50 ? color.green : color.red, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 18, "RR Ratio: " + str.tostring(rrRatio, "#.#") + ":1 | Risk: " + str.tostring(maxRiskPercent, "#.#") + "%", 
+         text_color=rrRatio >= 1.5 ? color.green : color.orange, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 19, "Max Duration: " + str.tostring(maxTradeDuration) + " bars", 
+         text_color=color.silver, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    table.cell(statusTable, 0, 20, "Trade ID: " + lastTradeID, 
+         text_color=color.silver, bgcolor=color.new(#2b3139, 85), text_size=size.small)
+    if enablePyramiding and inTrade
+        table.cell(statusTable, 0, 21, "Pyramids: " + str.tostring(pyramidCount), 
+             text_color=color.orange, bgcolor=color.new(#2b3139, 85), text_size=size.small)

@@ -450,13 +450,6 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       return;
    }
    
-   // Check if this deal belongs to our EA (by magic number)
-   if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != MagicNumber) {
-      if(DebugMode) Print("TradingSignalEA: OnTradeTransaction - Deal magic mismatch: ", 
-                          HistoryDealGetInteger(dealTicket, DEAL_MAGIC), " vs ", MagicNumber);
-      return;
-   }
-   
    // Get deal entry type - CRITICAL: Only process OUT deals (position closes)
    ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
    
@@ -479,6 +472,72 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    
    if(positionId == 0) {
       Print("TradingSignalEA: ERROR - OnTradeTransaction - Position ID is 0 for deal: ", dealTicket);
+      return;
+   }
+   
+   // Check if this deal belongs to our EA (by magic number)
+   // First check deal magic, then fallback to position magic if deal magic is 0
+   long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+   bool belongsToEA = false;
+   
+   if(dealMagic == MagicNumber) {
+      belongsToEA = true;
+   } else if(dealMagic == 0) {
+      // Deal magic is 0, check position magic as fallback
+      // Find the opening deal (DEAL_ENTRY_IN) for this position - it should have the magic number
+      string symbol = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+      Print("TradingSignalEA: OnTradeTransaction - Deal magic is 0, searching for opening deal. Position ID: ", positionId, ", Symbol: ", symbol);
+      
+      // Select all history deals and search for the opening deal of this position
+      datetime fromDate = 0; // Search from beginning
+      datetime toDate = TimeCurrent();
+      
+      if(HistorySelect(fromDate, toDate)) {
+         int totalDeals = HistoryDealsTotal();
+         Print("TradingSignalEA: OnTradeTransaction - Searching through ", totalDeals, " history deals");
+         
+         for(int i = totalDeals - 1; i >= 0; i--) {
+            ulong histDeal = HistoryDealGetTicket(i);
+            if(histDeal > 0) {
+               ulong histPosId = HistoryDealGetInteger(histDeal, DEAL_POSITION_ID);
+               
+               // Check if this deal belongs to the same position
+               if(histPosId == positionId) {
+                  ENUM_DEAL_ENTRY histDealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(histDeal, DEAL_ENTRY);
+                  long histMagic = HistoryDealGetInteger(histDeal, DEAL_MAGIC);
+                  string histSymbol = HistoryDealGetString(histDeal, DEAL_SYMBOL);
+                  
+                  // Check opening deal (DEAL_ENTRY_IN) - it should have the magic number
+                  if(histDealEntry == DEAL_ENTRY_IN) {
+                     if(histMagic == MagicNumber) {
+                        belongsToEA = true;
+                        Print("TradingSignalEA: OnTradeTransaction - Found opening deal with matching magic: ", histMagic, " (Deal: ", histDeal, ")");
+                        break;
+                     } else {
+                        Print("TradingSignalEA: OnTradeTransaction - Opening deal found but magic mismatch: ", histMagic, " vs ", MagicNumber, " (Deal: ", histDeal, ")");
+                     }
+                  }
+                  // Also check if any deal for this position has our magic number
+                  else if(histMagic == MagicNumber) {
+                     belongsToEA = true;
+                     Print("TradingSignalEA: OnTradeTransaction - Found deal with matching magic for position: ", histMagic, " (Deal: ", histDeal, ", Entry: ", EnumToString(histDealEntry), ")");
+                     break;
+                  }
+               }
+            }
+         }
+      } else {
+         Print("TradingSignalEA: OnTradeTransaction - ERROR - Failed to select history deals");
+      }
+      
+      if(!belongsToEA) {
+         Print("TradingSignalEA: OnTradeTransaction - WARNING - Deal magic is 0 and no matching opening deal found for Position ID: ", positionId);
+      }
+   }
+   
+   if(!belongsToEA) {
+      Print("TradingSignalEA: OnTradeTransaction - Deal magic mismatch: ", 
+            dealMagic, " vs ", MagicNumber, " (Position ID: ", positionId, ")");
       return;
    }
    

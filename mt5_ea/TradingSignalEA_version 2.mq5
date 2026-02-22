@@ -105,10 +105,10 @@ input double ManualBaseAccountSize = 200000.0;  // 💰 Custom Base Amount: Pret
 
 input double MaxContractSizeMultiplier = 2.0;  // ⚠️ WARNING: Maximum multiplier for position size (default: 2.0, was 5.0 - reduced for safety)
 input int NetworkStabilizationDelay = 300;
-input double ForexCommissionPerLot = 6.0;  // Commission per lot round trip for forex (USD)
-input double GoldCommissionPerLot = 2.0;   // Commission per lot round trip for XAUUSD (USD)
+input double ForexCommissionPerLot = 5.0;  // Commission per lot round trip for forex (USD) - FTMO actual: $5/lot
+input double GoldCommissionPerLot = 7.0;   // Commission per lot round trip for XAUUSD (USD) - FTMO actual: ~$7/lot
 input bool AccountForBrokerCosts = true;   // Include commission and spread in calculations
-input bool GrossProfitMatchesRisk = true;  // Lot size so GROSS profit/loss = risk amount (net = gross ± commission)
+input bool GrossProfitMatchesRisk = false;  // false = NET loss at SL = risk amount (commission included in sizing)
 input bool AdjustTargetForCosts = true;    // Adjust TP to maintain 1:1 R:R after costs (RECOMMENDED)
 input bool ForceOneToOneRR = true;         // Force 1:1 R:R by adjusting target to match stop distance
 
@@ -141,15 +141,6 @@ input int HealthCheckHour = 9;  // Hour (UTC) to send daily health check (0-23)
 // Log management
 input bool EnableVerboseLogging = true;  // Set to false to reduce log file size
 input int LogCleanupCheckInterval = 3600;  // Check log size every N seconds (default: 1 hour)
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 📊 W-L RISK PROGRESSION (Labouchere-style) ⭐
-// ═══════════════════════════════════════════════════════════════════════════════
-// When enabled: ONE trade at a time only. Risk % changes based on win-loss sequence.
-// WIN = 4 wins before 5 losses → reset to 0.65%. LOST = 5 losses before 4 wins → reset to 0.65%.
-// State persisted via GlobalVariables (survives EA restart).
-input bool UseWLRiskProgression = false;  // 📊⭐ Enable W-L based risk progression (one trade only, risk varies by sequence)
-input string WLProgressionPrefix = "WL_";  // Prefix for GlobalVariable keys (change if running multiple EAs)
 
 //--- Global variables
 datetime lastPollTime = 0;
@@ -193,14 +184,6 @@ int recentSymbolsCount = 0;
 ulong tradeCloseEmailsSent[];
 int tradeCloseEmailsSentCount = 0;
 
-// W-L Risk Progression state (persisted via GlobalVariables when UseWLRiskProgression=true)
-int wlSequenceWins = 0;
-int wlSequenceLosses = 0;
-
-// Positions closed at HK shutdown - skip W-L state update (keep same risk for next trade)
-ulong hkShutdownClosedTickets[];
-datetime hkShutdownClosedTimes[];
-int hkShutdownClosedCount = 0;
 
 void CleanupRecentSymbols() {
    if(DuplicateCheckWindow <= 0 || recentSymbolsCount == 0)
@@ -224,111 +207,6 @@ void CleanupRecentSymbols() {
    ArrayResize(recentSymbolsTimes, writeIndex);
 }
 
-//+------------------------------------------------------------------+
-//| W-L Risk Progression: Get risk % for current (wins, losses)      |
-//| Flowchart: WIN=4 wins, LOST=5 losses → both reset to 0.65%       |
-//+------------------------------------------------------------------+
-double GetWLRiskPercent(int wins, int losses) {
-   // Beyond all flowchart states: safety fallback (should never happen)
-   if(wins >= 5 || losses >= 6) return 0.65;
-   // Round 1
-   if(wins == 0 && losses == 0) return 0.65;
-   // Round 2
-   if(wins == 1 && losses == 0) return 0.58;
-   if(wins == 0 && losses == 1) return 0.73;
-   // Round 3
-   if(wins == 2 && losses == 0) return 0.44;
-   if(wins == 1 && losses == 1) return 0.73;
-   if(wins == 0 && losses == 2) return 0.73;
-   // Round 4
-   if(wins == 3 && losses == 0) return 0.25;
-   if(wins == 2 && losses == 1) return 0.62;
-   if(wins == 1 && losses == 2) return 0.83;
-   if(wins == 0 && losses == 3) return 0.62;
-   // Round 5
-   if(wins == 4 && losses == 0) return 0.08;
-   if(wins == 3 && losses == 1) return 0.41;
-   if(wins == 2 && losses == 2) return 0.83;
-   if(wins == 1 && losses == 3) return 0.83;
-   if(wins == 0 && losses == 4) return 0.41;
-   // Round 6
-   if(wins == 4 && losses == 1) return 0.17;
-   if(wins == 3 && losses == 2) return 0.66;
-   if(wins == 2 && losses == 3) return 0.99;
-   if(wins == 1 && losses == 4) return 0.66;
-   if(wins == 0 && losses == 5) return 0.17;
-   // Round 7
-   if(wins == 4 && losses == 2) return 0.33;
-   if(wins == 3 && losses == 3) return 0.99;
-   if(wins == 2 && losses == 4) return 0.99;
-   if(wins == 1 && losses == 5) return 0.33;
-   // Round 8
-   if(wins == 4 && losses == 3) return 0.66;
-   if(wins == 3 && losses == 4) return 1.33;
-   if(wins == 2 && losses == 5) return 0.66;
-   // Round 9
-   if(wins == 4 && losses == 4) return 1.33;
-   if(wins == 3 && losses == 5) return 1.33;
-   // Round 10
-   if(wins == 4 && losses == 5) return 2.65;
-   return 0.65;  // Safety fallback
-}
-
-//+------------------------------------------------------------------+
-//| W-L Risk Progression: Load state from GlobalVariables            |
-//+------------------------------------------------------------------+
-void LoadWLState() {
-   string keyW = WLProgressionPrefix + "Wins";
-   string keyL = WLProgressionPrefix + "Losses";
-   if(GlobalVariableCheck(keyW)) wlSequenceWins = (int)GlobalVariableGet(keyW);
-   else wlSequenceWins = 0;
-   if(GlobalVariableCheck(keyL)) wlSequenceLosses = (int)GlobalVariableGet(keyL);
-   else wlSequenceLosses = 0;
-}
-
-//+------------------------------------------------------------------+
-//| W-L Risk Progression: Save state to GlobalVariables              |
-//+------------------------------------------------------------------+
-void SaveWLState() {
-   GlobalVariableSet(WLProgressionPrefix + "Wins", (double)wlSequenceWins);
-   GlobalVariableSet(WLProgressionPrefix + "Losses", (double)wlSequenceLosses);
-}
-
-//+------------------------------------------------------------------+
-//| Get effective max positions (1 when W-L mode, else input value)  |
-//+------------------------------------------------------------------+
-int GetEffectiveMaxPositions() {
-   return UseWLRiskProgression ? 1 : MaxConcurrentPositions;
-}
-
-//+------------------------------------------------------------------+
-//| W-L Risk Progression: Update state on trade close (win/loss)     |
-//| Call this when a trade closes. Resets to 0-0 on WIN or LOST.     |
-//+------------------------------------------------------------------+
-void UpdateWLStateOnTradeClose(string outcome) {
-   if(!UseWLRiskProgression) return;
-   LoadWLState();
-   if(outcome == "win") {
-      wlSequenceWins++;
-      // WIN terminal: 5th win (states 4-x + win → WIN)
-      if(wlSequenceWins >= 5) {
-         Print("TradingSignalEA: 📊 W-L PROGRESSION → WIN (5th win in sequence) - Resetting to 0.65%");
-         wlSequenceWins = 0;
-         wlSequenceLosses = 0;
-      }
-   } else {
-      wlSequenceLosses++;
-      // LOST terminal: 6th loss (states x-5 + loss → LOST)
-      if(wlSequenceLosses >= 6) {
-         Print("TradingSignalEA: 📊 W-L PROGRESSION → LOST (6th loss in sequence) - Resetting to 0.65%");
-         wlSequenceWins = 0;
-         wlSequenceLosses = 0;
-      }
-   }
-   SaveWLState();
-   Print("TradingSignalEA: 📊 W-L State: ", wlSequenceWins, "-", wlSequenceLosses, " → Next risk: ", GetWLRiskPercent(wlSequenceWins, wlSequenceLosses), "%");
-}
-
 struct SignalRetry {
    string signalId;
    int retryCount;
@@ -337,6 +215,11 @@ struct SignalRetry {
 SignalRetry signalRetries[];
 int signalRetriesCount = 0;
 
+// Map position ticket -> signal ID for trade-close email (avoids "Signal ID: N/A" when broker doesn't store order comment on deal)
+#define MAX_POSITION_SIGNAL_MAP 200
+ulong g_positionTicketsForSignal[];
+string g_positionSignalIdsForEmail[];
+int g_positionSignalMapCount = 0;
 
 enum ConnectionState {
    DISCONNECTED,
@@ -669,12 +552,6 @@ int OnInit() {
       Print("TradingSignalEA: Filter enabled - Higher timeframe filter initialized");
    }
 
-   // Load W-L progression state if enabled
-   if(UseWLRiskProgression) {
-      LoadWLState();
-      Print("TradingSignalEA: 📊 W-L Risk Progression ENABLED - One trade only, State: ", wlSequenceWins, "-", wlSequenceLosses, " → Risk: ", GetWLRiskPercent(wlSequenceWins, wlSequenceLosses), "%");
-   }
-
    Print("TradingSignalEA: Initialized successfully. Connection state: ", connectionManager.GetStateString());
    return INIT_SUCCEEDED;
 }
@@ -959,8 +836,8 @@ void OnTimer() {
          shouldPoll = false;
       }
       
-      if(PositionsTotal() >= GetEffectiveMaxPositions()) {
-         if(EnableVerboseLogging) Print("TradingSignalEA: Maximum concurrent positions reached (", GetEffectiveMaxPositions(), ") - skipping poll");
+      if(PositionsTotal() >= MaxConcurrentPositions) {
+         if(EnableVerboseLogging) Print("TradingSignalEA: Maximum concurrent positions reached (", MaxConcurrentPositions, ") - skipping poll");
          shouldPoll = false;
       }
       
@@ -1711,8 +1588,8 @@ bool ProcessSignal(const TradingSignal& signal) {
    }
 
    // Safety: check max position limit before execution (prevents overshoot if position opened externally)
-   if(PositionsTotal() >= GetEffectiveMaxPositions()) {
-      Print("TradingSignalEA: Max positions already reached (", PositionsTotal(), "/", GetEffectiveMaxPositions(), ") - cannot execute signal: ", signal.id);
+   if(PositionsTotal() >= MaxConcurrentPositions) {
+      Print("TradingSignalEA: Max positions already reached (", PositionsTotal(), "/", MaxConcurrentPositions, ") - cannot execute signal: ", signal.id);
       RemoveActiveSymbol(signal.symbol);
       RemoveSignalFromProcessedList(signal.id);
       currentlyProcessingSignal = "";
@@ -1722,16 +1599,8 @@ bool ProcessSignal(const TradingSignal& signal) {
       return false;
    }
 
-   // W-L Risk Progression: Override risk % with sequence-based value
-   TradingSignal signalToExecute = signal;
-   if(UseWLRiskProgression) {
-      LoadWLState();
-      signalToExecute.risk_percent = GetWLRiskPercent(wlSequenceWins, wlSequenceLosses);
-      Print("TradingSignalEA: 📊 W-L Progression - State ", wlSequenceWins, "-", wlSequenceLosses, " → Risk: ", signalToExecute.risk_percent, "%");
-   }
-   
    if(AutoExecute) {
-      if(ExecuteTrade(signalToExecute)) {
+      if(ExecuteTrade(signal)) {
          Print("TradingSignalEA: Trade executed successfully for signal: ", signal.id);
          SendSignalAck(signal.id, "executed", "Trade executed successfully");
          AddActiveSymbol(signal.symbol);
@@ -1839,8 +1708,8 @@ bool ValidateSignal(const TradingSignal& signal) {
       return false;
    }
    
-   if(signal.stop != 0 && signal.stop <= 0) {
-      Print("TradingSignalEA: Invalid stop loss: ", signal.stop);
+   if(signal.stop <= 0) {
+      Print("TradingSignalEA: Invalid or missing stop loss: ", signal.stop);
       return false;
    }
 
@@ -2029,10 +1898,8 @@ double CalculateLotSize(const TradingSignal& signal, double actualEntryPrice = 0
       return 0;
    }
 
-   // Determine which base amount to use for risk calculation
-   // W-L mode: always use FIXED sizing (initial balance). Otherwise use user setting.
    double baseAmount = actualBalance;
-   bool useFixedForThisTrade = !UseDynamicContractSize || UseWLRiskProgression;
+   bool useFixedForThisTrade = !UseDynamicContractSize;
    
    if(useFixedForThisTrade) {
       // Use fixed sizing (not dynamic) - ALWAYS use initial deposit for consistent risk
@@ -2045,7 +1912,6 @@ double CalculateLotSize(const TradingSignal& signal, double actualEntryPrice = 0
          // Auto mode: ALWAYS use configured InitialDeposit (original funding amount)
          if(initialAccountBalance > 0) {
             baseAmount = initialAccountBalance;
-            if(UseWLRiskProgression) Print("TradingSignalEA: W-L mode: Using FIXED sizing (Initial Deposit)");
             Print("TradingSignalEA: Using INITIAL DEPOSIT (FIXED): ", accountCurrency, " ", baseAmount, 
                   " (Current balance: ", accountCurrency, " ", actualBalance, ", Equity: ", accountCurrency, " ", actualEquity, ")");
          } else {
@@ -2581,14 +2447,9 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize, doub
       }
    }
    
-   // Calculate broker costs per lot
-   long spreadPointsLong = SymbolInfoInteger(signal.symbol, SYMBOL_SPREAD);
-   double spreadPoints = (double)spreadPointsLong;
-   double spreadInPips = spreadPoints * (pipSize / SymbolInfoDouble(signal.symbol, SYMBOL_POINT));
-   
+   // Commission per lot (spread is already priced into bid/ask execution - NOT double-counted here)
    double commissionPerLot = isXAUUSD ? GoldCommissionPerLot : ForexCommissionPerLot;
    
-   // Convert commission to account currency if needed
    if(accountCurrency != "USD") {
       string conversionPair1 = "USD" + accountCurrency;
       string conversionPair2 = accountCurrency + "USD";
@@ -2602,47 +2463,22 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize, doub
       }
    }
    
-   double spreadCostPerLot = spreadInPips * pipValueInAccountCurrency;
-   double totalCostPerLot = spreadCostPerLot + commissionPerLot;
+   double totalCommission = lotSize * commissionPerLot;
    
-   // Calculate total broker costs for the position
-   double totalBrokerCosts = lotSize * totalCostPerLot;
+   // For 1:1 net R:R, TP must compensate for round-trip commission on both sides:
+   //   Net loss at SL  = lot × SL_pips × pipValue + commission  (commission adds to loss)
+   //   Net profit at TP = lot × TP_pips × pipValue - commission  (commission subtracts from profit)
+   //   Setting equal: TP_pips = SL_pips + (2 × commissionPerLot / pipValuePerLot)
+   double costPipsToAdd = (pipValueInAccountCurrency > 0)
+      ? (2.0 * commissionPerLot / pipValueInAccountCurrency)
+      : 0.0;
    
-   // Calculate expected net loss at stop loss
-   double expectedNetLoss = (lotSize * stopDistancePips * pipValueInAccountCurrency) + totalBrokerCosts;
-   
-   // Calculate target net profit to be slightly larger than net loss for positive edge
-   // Conservative approach: TP should be only slightly larger than SL (around 3-5% more)
-   // This balances profitability with achievability to avoid near-misses
-   double netProfitEdgePercent = 0.01;  // 1% larger net profit than net loss (conservative)
-   double targetNetProfit = expectedNetLoss * (1.0 + netProfitEdgePercent);
-   
-   // Calculate required gross profit to achieve target net profit
-   double requiredGrossProfit = targetNetProfit + totalBrokerCosts;
-   
-   // Calculate required TP pips to achieve target net profit
-   double requiredTPPips = requiredGrossProfit / (lotSize * pipValueInAccountCurrency);
-   
-   // Calculate how many pips to add to base 1:1 target
-   double costPipsToAdd = requiredTPPips - stopDistancePips;
-   
-   // Limit adjustment to conservative range - TP should be only slightly larger than SL
-   // For 17.3 pip SL, max TP would be ~18 pips (about 4% more)
-   double maxAdjustmentPercent = 0.05;  // Max 5% of stop distance (conservative)
-   double maxAdjustmentPips = MathMin(stopDistancePips * maxAdjustmentPercent, 3.0);  // Cap at 3 pips max
-   
-   if(costPipsToAdd > maxAdjustmentPips) {
-      Print("TradingSignalEA: WARNING - Cost adjustment (", costPipsToAdd, " pips) exceeds max (", maxAdjustmentPips, " pips), limiting");
-      costPipsToAdd = maxAdjustmentPips;
-      // Recalculate with limited adjustment
-      requiredTPPips = stopDistancePips + costPipsToAdd;
-      requiredGrossProfit = requiredTPPips * lotSize * pipValueInAccountCurrency;
-      targetNetProfit = requiredGrossProfit - totalBrokerCosts;
+   if(costPipsToAdd > 5.0) {
+      Print("TradingSignalEA: WARNING - Commission TP adjustment (", costPipsToAdd, " pips) exceeds 5-pip safety cap, limiting");
+      costPipsToAdd = 5.0;
    }
    
-   // Ensure TP is larger than SL to guarantee net profit > net loss after all costs
-   double minTPPips = stopDistancePips * 1.02;  // At least 2% more to ensure positive R:R after costs
-   double finalTargetPips = MathMax(minTPPips, requiredTPPips);
+   double finalTargetPips = stopDistancePips + costPipsToAdd;
    
    // Calculate final target price based on actual entry
    double adjustedTarget = 0;
@@ -2659,9 +2495,9 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize, doub
    double actualSLPips = stopDistancePips;
    double tpSlRatio = actualTPPips / actualSLPips;
    
-   // Calculate final expected values
-   double finalExpectedNetProfit = (lotSize * actualTPPips * pipValueInAccountCurrency) - totalBrokerCosts;
-   double finalExpectedNetLoss = (lotSize * actualSLPips * pipValueInAccountCurrency) + totalBrokerCosts;
+   // Calculate final expected values (commission only - spread already in execution prices)
+   double finalExpectedNetProfit = (lotSize * actualTPPips * pipValueInAccountCurrency) - totalCommission;
+   double finalExpectedNetLoss = (lotSize * actualSLPips * pipValueInAccountCurrency) + totalCommission;
    double profitLossRatio = (finalExpectedNetLoss > 0) ? (finalExpectedNetProfit / finalExpectedNetLoss) : 1.0;
    double profitExcess = finalExpectedNetProfit - finalExpectedNetLoss;
    double profitExcessPercent = (finalExpectedNetLoss > 0) ? ((profitExcess / finalExpectedNetLoss) * 100.0) : 0.0;
@@ -2672,7 +2508,7 @@ double CalculateAdjustedTarget(const TradingSignal& signal, double lotSize, doub
    Print("TradingSignalEA: Actual Entry Price: ", actualEntryPrice);
    Print("TradingSignalEA: Stop Loss: ", signal.stop);
    Print("TradingSignalEA: Stop Distance: ", actualSLPips, " pips");
-   Print("TradingSignalEA: Total Broker Costs: ", accountCurrency, " ", totalBrokerCosts);
+   Print("TradingSignalEA: Total Commission: ", accountCurrency, " ", totalCommission);
    Print("TradingSignalEA: Cost Pips to Add: ", costPipsToAdd);
    Print("TradingSignalEA: Final Target Pips: ", actualTPPips, " pips");
    Print("TradingSignalEA: TP/SL Ratio: ", DoubleToString(tpSlRatio, 3));
@@ -3034,6 +2870,24 @@ bool ExecuteTrade(const TradingSignal& signal) {
          " | Symbol: ", signal.symbol, " | Price: ", result.price, " | Lot: ", lotSize,
          " | Risk: ", signal.risk_percent, "%");
    
+   // Store position ticket -> signal ID so close email shows correct Signal ID (brokers often don't copy order comment to deal)
+   if(result.deal > 0 && signal.id != "" && HistoryDealSelect(result.deal)) {
+      ulong posId = (ulong)HistoryDealGetInteger(result.deal, DEAL_POSITION_ID);
+      if(posId > 0) {
+         if(g_positionSignalMapCount >= MAX_POSITION_SIGNAL_MAP) {
+            ArrayCopy(g_positionTicketsForSignal, g_positionTicketsForSignal, 0, 1, g_positionSignalMapCount - 1);
+            ArrayCopy(g_positionSignalIdsForEmail, g_positionSignalIdsForEmail, 0, 1, g_positionSignalMapCount - 1);
+            g_positionSignalMapCount = MAX_POSITION_SIGNAL_MAP - 1;
+         }
+         ArrayResize(g_positionTicketsForSignal, g_positionSignalMapCount + 1);
+         ArrayResize(g_positionSignalIdsForEmail, g_positionSignalMapCount + 1);
+         g_positionTicketsForSignal[g_positionSignalMapCount] = posId;
+         g_positionSignalIdsForEmail[g_positionSignalMapCount] = signal.id;
+         g_positionSignalMapCount++;
+         Print("TradingSignalEA: Stored Signal ID ", signal.id, " for position ", posId);
+      }
+   }
+   
    // Release global signal lock after successful execution
    globalSignalLock = "";
    globalSignalLockTime = 0;
@@ -3334,14 +3188,6 @@ void AutoCloseAllTrades() {
       if(ticket > 0 && PositionSelectByTicket(ticket)) {
          if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
             string symbol = PositionGetString(POSITION_SYMBOL);
-            // Mark as HK shutdown close so W-L state is NOT updated (next trade keeps same risk)
-            if(UseWLRiskProgression) {
-               ArrayResize(hkShutdownClosedTickets, hkShutdownClosedCount + 1);
-               ArrayResize(hkShutdownClosedTimes, hkShutdownClosedCount + 1);
-               hkShutdownClosedTickets[hkShutdownClosedCount] = ticket;
-               hkShutdownClosedTimes[hkShutdownClosedCount] = TimeGMT();
-               hkShutdownClosedCount++;
-            }
             ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
             MqlTradeRequest request = {};
@@ -3387,6 +3233,27 @@ bool UpdateTradeOutcomeWithSymbol(ulong ticket, string symbol, string outcome, b
    datetime openTime = 0;
    datetime closeTime = TimeGMT();
    
+   // Prefer stored ticket->signalId map (set when we opened the trade; brokers often don't copy order comment to deal)
+   for(int m = g_positionSignalMapCount - 1; m >= 0; m--) {
+      if(g_positionTicketsForSignal[m] == ticket) {
+         signalId = g_positionSignalIdsForEmail[m];
+         if(m < g_positionSignalMapCount - 1) {
+            for(int k = m; k < g_positionSignalMapCount - 1; k++) {
+               g_positionTicketsForSignal[k] = g_positionTicketsForSignal[k + 1];
+               g_positionSignalIdsForEmail[k] = g_positionSignalIdsForEmail[k + 1];
+            }
+            g_positionSignalMapCount--;
+            ArrayResize(g_positionTicketsForSignal, g_positionSignalMapCount);
+            ArrayResize(g_positionSignalIdsForEmail, g_positionSignalMapCount);
+         } else {
+            g_positionSignalMapCount--;
+            ArrayResize(g_positionTicketsForSignal, g_positionSignalMapCount);
+            ArrayResize(g_positionSignalIdsForEmail, g_positionSignalMapCount);
+         }
+         break;
+      }
+   }
+   
    // Find all deals for this position to get complete information
    // We need to find both open and close deals
    ulong openDealTicket = 0;
@@ -3412,16 +3279,34 @@ bool UpdateTradeOutcomeWithSymbol(ulong ticket, string symbol, string outcome, b
             }
          }
          
-         // Try to extract signal ID from deal comment (prefer close deal comment)
-         string comment = HistoryDealGetString(dealTicket, DEAL_COMMENT);
-         if(StringFind(comment, "Signal:") >= 0 && signalId == "") {
-            int signalPos = StringFind(comment, "Signal: ");
-            if(signalPos >= 0) {
-               int pipePos = StringFind(comment, " |", signalPos);
-               if(pipePos > signalPos) {
-                  signalId = StringSubstr(comment, signalPos + 8, pipePos - signalPos - 8);
+         // Try to extract signal ID from deal comment (open deal has it; close deal often does not)
+         if(signalId == "") {
+            string comment = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+            if(StringFind(comment, "Signal:") >= 0) {
+               int signalPos = StringFind(comment, "Signal: ");
+               if(signalPos >= 0) {
+                  int pipePos = StringFind(comment, " |", signalPos);
+                  if(pipePos > signalPos)
+                     signalId = StringSubstr(comment, signalPos + 8, pipePos - signalPos - 8);
+                  else
+                     signalId = StringSubstr(comment, signalPos + 8);
                }
             }
+         }
+      }
+   }
+   
+   // If still no signal ID, prefer OPEN deal comment (brokers often don't copy order comment to close deal)
+   if(signalId == "" && openDealTicket > 0) {
+      string openComment = HistoryDealGetString(openDealTicket, DEAL_COMMENT);
+      if(StringFind(openComment, "Signal:") >= 0) {
+         int signalPos = StringFind(openComment, "Signal: ");
+         if(signalPos >= 0) {
+            int pipePos = StringFind(openComment, " |", signalPos);
+            if(pipePos > signalPos)
+               signalId = StringSubstr(openComment, signalPos + 8, pipePos - signalPos - 8);
+            else
+               signalId = StringSubstr(openComment, signalPos + 8);
          }
       }
    }
@@ -3538,30 +3423,6 @@ bool UpdateTradeOutcomeWithSymbol(ulong ticket, string symbol, string outcome, b
    Print("TradingSignalEA: Entry Price: ", entryPrice, ", Close Price: ", closePrice, ", Lot Size: ", lotSize);
    SendTradeCloseEmailDetailed(ticket, symbol, actionStr, entryPrice, closePrice, lotSize, netProfit, outcome, signalId, openTime, closeTime);
    Print("TradingSignalEA: SendTradeCloseEmailDetailed completed for ticket ", ticket);
-
-   // Update W-L progression state for next trade risk (skip if closed at HK shutdown - keep same risk)
-   bool isHkShutdownClose = false;
-   datetime cutoff = TimeGMT() - 3600;  // Remove entries older than 1 hour
-   int writeIdx = 0;
-   for(int h = 0; h < hkShutdownClosedCount; h++) {
-      if(hkShutdownClosedTickets[h] == ticket) {
-         isHkShutdownClose = true;
-         Print("TradingSignalEA: 📊 W-L - Trade closed at HK shutdown, NOT updating state (next risk unchanged)");
-      }
-      if(hkShutdownClosedTimes[h] >= cutoff) {
-         if(writeIdx != h) {
-            hkShutdownClosedTickets[writeIdx] = hkShutdownClosedTickets[h];
-            hkShutdownClosedTimes[writeIdx] = hkShutdownClosedTimes[h];
-         }
-         writeIdx++;
-      }
-   }
-   if(writeIdx != hkShutdownClosedCount) {
-      hkShutdownClosedCount = writeIdx;
-      ArrayResize(hkShutdownClosedTickets, writeIdx);
-      ArrayResize(hkShutdownClosedTimes, writeIdx);
-   }
-   if(!isHkShutdownClose) UpdateWLStateOnTradeClose(outcome);
 
    if(result == 200) {
       Print("TradingSignalEA: Trade outcome updated successfully - Ticket: ", ticket, ", Symbol: ", symbol, ", Outcome: ", outcome);
@@ -3968,18 +3829,6 @@ void SendTradeExecutionEmail(const TradingSignal& signal, const MqlTradeResult& 
   double priceDiffLocal = (signal.action == ORDER_TYPE_BUY) ? (signal.entry - signal.stop) : (signal.stop - signal.entry);
   if(pipSizeLocal > 0) stopPips = priceDiffLocal / pipSizeLocal;
 
-  // Build W-L progression info for email
-  string wlInfo = "";
-  if(UseWLRiskProgression) {
-     LoadWLState();
-     wlInfo = StringFormat(
-        "\n--- W-L Risk Progression ---\n"
-        "Current State: %d-%d\n"
-        "Risk Used: %.2f%%\n",
-        wlSequenceWins, wlSequenceLosses,
-        signal.risk_percent);
-  }
-
   string body = StringFormat(
     "Signal ID: %s\n"
     "Symbol: %s\n"
@@ -4012,8 +3861,6 @@ void SendTradeExecutionEmail(const TradingSignal& signal, const MqlTradeResult& 
     result.comment,
     AccountInfoInteger(ACCOUNT_LOGIN)
   );
-
-  if(wlInfo != "") body = body + wlInfo;
 
   SendTradeEmail(subject, body);
 }
@@ -4111,34 +3958,6 @@ void SendTradeCloseEmailDetailed(ulong ticket, string symbol, string action,
   string subject = StringFormat("MT5 Trade CLOSED - %s %s %s (ID: %s)", 
                                 outcomeTag, actionStr, symbol, signalIdStr);
   
-  // Build W-L progression info for close email
-  string wlCloseInfo = "";
-  if(UseWLRiskProgression) {
-     LoadWLState();
-     int prevWins = wlSequenceWins;
-     int prevLosses = wlSequenceLosses;
-     // Simulate what the state WILL be after this trade updates it
-     int nextWins = prevWins;
-     int nextLosses = prevLosses;
-     string wlTerminal = "";
-     if(outcome == "win") {
-        nextWins++;
-        if(nextWins >= 5) { wlTerminal = " >>> WIN - Reset to 0.65%"; nextWins = 0; nextLosses = 0; }
-     } else {
-        nextLosses++;
-        if(nextLosses >= 6) { wlTerminal = " >>> LOST - Reset to 0.65%"; nextWins = 0; nextLosses = 0; }
-     }
-     wlCloseInfo = StringFormat(
-        "\n--- W-L Risk Progression ---\n"
-        "Before: %d-%d (Risk: %.2f%%)\n"
-        "Result: %s\n"
-        "After: %d-%d (Next Risk: %.2f%%)%s\n",
-        prevWins, prevLosses, GetWLRiskPercent(prevWins, prevLosses),
-        (outcome == "win") ? "WIN" : "LOSS",
-        nextWins, nextLosses, GetWLRiskPercent(nextWins, nextLosses),
-        wlTerminal);
-  }
-
   string body = StringFormat(
     "Signal ID: %s\n"
     "Ticket: %d\n"
@@ -4175,8 +3994,6 @@ void SendTradeCloseEmailDetailed(ulong ticket, string symbol, string action,
     AccountInfoInteger(ACCOUNT_LOGIN)
   );
 
-  if(wlCloseInfo != "") body = body + wlCloseInfo;
-  
   Print("TradingSignalEA: ========================================");
   Print("TradingSignalEA: Sending trade close email");
   Print("TradingSignalEA: Subject: ", subject);
@@ -4325,56 +4142,28 @@ void SendPositionSizingSettingsEmail() {
         );
      } else {
         sizingMode = "FIXED (Initial Deposit)";
-        if(UseWLRiskProgression) {
-           double wlRisk = GetWLRiskPercent(wlSequenceWins, wlSequenceLosses);
-           double wlDollarRisk = initialAccountBalance * wlRisk / 100.0;
-           sizingDetails = StringFormat(
-             "Mode: %s + W-L PROGRESSION\n"
-             "Risk Base: INITIAL DEPOSIT\n"
-             "Initial Deposit: %s %.2f\n"
-             "Current Balance: %s %.2f\n"
-             "Current Equity: %s %.2f\n"
-             "W-L State: %d-%d → Risk: %.2f%%\n\n"
-             "How it works:\n"
-             "- Risk is ALWAYS calculated from Initial Deposit\n"
-             "- Risk %% is DYNAMIC (W-L progression, starts at 0.65%%)\n"
-             "- One trade only; risk varies by win/loss sequence\n"
-             "- Resets to 0.65%% on WIN or LOST terminal state\n\n"
-             "Example (current state):\n"
-             "Initial Deposit: %s %.2f → Risk %.2f%% = %s %.2f",
-             sizingMode,
-             accountCurrency, initialAccountBalance,
-             accountCurrency, currentBalance,
-             accountCurrency, currentEquity,
-             wlSequenceWins, wlSequenceLosses, wlRisk,
-             accountCurrency, initialAccountBalance,
-             wlRisk,
-             accountCurrency, wlDollarRisk
-           );
-        } else {
-           sizingDetails = StringFormat(
-             "Mode: %s\n"
-             "Risk Base: INITIAL DEPOSIT\n"
-             "Initial Deposit: %s %.2f\n"
-             "Current Balance: %s %.2f\n"
-             "Current Equity: %s %.2f\n\n"
-             "How it works:\n"
-             "- Risk is ALWAYS calculated from Initial Deposit\n"
-             "- Position size stays constant regardless of wins/losses\n"
-             "- Risk percentage stays constant (e.g., %.2f%%)\n"
-             "- Dollar risk amount stays constant\n\n"
-             "Example:\n"
-             "Initial Deposit: %s %.2f → Risk %.2f%% = %s %.2f (ALWAYS)",
-             sizingMode,
-             accountCurrency, initialAccountBalance,
-             accountCurrency, currentBalance,
-             accountCurrency, currentEquity,
-             RiskPercent,
-             accountCurrency, initialAccountBalance,
-             RiskPercent,
-             accountCurrency, (initialAccountBalance * RiskPercent / 100.0)
-           );
-        }
+        sizingDetails = StringFormat(
+          "Mode: %s\n"
+          "Risk Base: INITIAL DEPOSIT\n"
+          "Initial Deposit: %s %.2f\n"
+          "Current Balance: %s %.2f\n"
+          "Current Equity: %s %.2f\n\n"
+          "How it works:\n"
+          "- Risk is ALWAYS calculated from Initial Deposit\n"
+          "- Position size stays constant regardless of wins/losses\n"
+          "- Risk percentage stays constant (e.g., %.2f%%)\n"
+          "- Dollar risk amount stays constant\n\n"
+          "Example:\n"
+          "Initial Deposit: %s %.2f → Risk %.2f%% = %s %.2f (ALWAYS)",
+          sizingMode,
+          accountCurrency, initialAccountBalance,
+          accountCurrency, currentBalance,
+          accountCurrency, currentEquity,
+          RiskPercent,
+          accountCurrency, initialAccountBalance,
+          RiskPercent,
+          accountCurrency, (initialAccountBalance * RiskPercent / 100.0)
+        );
      }
   }
   
@@ -4695,56 +4484,28 @@ void SendDailyHealthCheckEmail() {
       } else {
          sizingMode = "FIXED (Initial Deposit)";
          sizingBase = StringFormat("%s %.2f", accountCurrency, initialAccountBalance);
-         if(UseWLRiskProgression) {
-            double wlRisk = GetWLRiskPercent(wlSequenceWins, wlSequenceLosses);
-            double wlDollarRisk = initialAccountBalance * wlRisk / 100.0;
-            sizingDetails = StringFormat(
-               "Mode: %s + W-L PROGRESSION\n"
-               "Risk Base: INITIAL DEPOSIT\n"
-               "Initial Deposit: %s %.2f\n"
-               "Current Balance: %s %.2f\n"
-               "Current Equity: %s %.2f\n"
-               "W-L State: %d-%d → Risk: %.2f%%\n\n"
-               "How it works:\n"
-               "- Risk is ALWAYS calculated from Initial Deposit\n"
-               "- Risk %% is DYNAMIC (W-L progression, starts at 0.65%%)\n"
-               "- One trade only; risk varies by win/loss sequence\n"
-               "- Resets to 0.65%% on WIN or LOST terminal state\n\n"
-               "Example (current state):\n"
-               "Initial Deposit: %s %.2f → Risk %.2f%% = %s %.2f",
-               sizingMode,
-               accountCurrency, initialAccountBalance,
-               accountCurrency, currentBalance,
-               accountCurrency, currentEquity,
-               wlSequenceWins, wlSequenceLosses, wlRisk,
-               accountCurrency, initialAccountBalance,
-               wlRisk,
-               accountCurrency, wlDollarRisk
-            );
-         } else {
-            sizingDetails = StringFormat(
-               "Mode: %s\n"
-               "Risk Base: INITIAL DEPOSIT\n"
-               "Initial Deposit: %s %.2f\n"
-               "Current Balance: %s %.2f\n"
-               "Current Equity: %s %.2f\n\n"
-               "How it works:\n"
-               "- Risk is ALWAYS calculated from Initial Deposit\n"
-               "- Position size stays constant regardless of wins/losses\n"
-               "- Risk percentage stays constant (e.g., %.2f%%)\n"
-               "- Dollar risk amount stays constant\n\n"
-               "Example:\n"
-               "Initial Deposit: %s %.2f → Risk %.2f%% = %s %.2f (ALWAYS)",
-               sizingMode,
-               accountCurrency, initialAccountBalance,
-               accountCurrency, currentBalance,
-               accountCurrency, currentEquity,
-               RiskPercent,
-               accountCurrency, initialAccountBalance,
-               RiskPercent,
-               accountCurrency, (initialAccountBalance * RiskPercent / 100.0)
-            );
-         }
+         sizingDetails = StringFormat(
+            "Mode: %s\n"
+            "Risk Base: INITIAL DEPOSIT\n"
+            "Initial Deposit: %s %.2f\n"
+            "Current Balance: %s %.2f\n"
+            "Current Equity: %s %.2f\n\n"
+            "How it works:\n"
+            "- Risk is ALWAYS calculated from Initial Deposit\n"
+            "- Position size stays constant regardless of wins/losses\n"
+            "- Risk percentage stays constant (e.g., %.2f%%)\n"
+            "- Dollar risk amount stays constant\n\n"
+            "Example:\n"
+            "Initial Deposit: %s %.2f → Risk %.2f%% = %s %.2f (ALWAYS)",
+            sizingMode,
+            accountCurrency, initialAccountBalance,
+            accountCurrency, currentBalance,
+            accountCurrency, currentEquity,
+            RiskPercent,
+            accountCurrency, initialAccountBalance,
+            RiskPercent,
+            accountCurrency, (initialAccountBalance * RiskPercent / 100.0)
+         );
       }
    }
    

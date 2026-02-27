@@ -2,7 +2,6 @@ import { logger } from '../utils/logger.js';
 
 export class EmailService {
   constructor() {
-    this.web3FormsKey = process.env.WEB3FORMS_ACCESS_KEY || 'a2927d87-5196-4690-a8dc-d06dcb7634f8';
     this.recipientEmail = process.env.ALERT_EMAIL || 'leechungleuk@gmail.com';
   }
 
@@ -17,11 +16,6 @@ export class EmailService {
         text: this.generateImmediateAlertText(alert)
       };
 
-      // Try Web3Forms first
-      const success = await this.sendViaWeb3Forms(emailContent);
-      if (success) return true;
-
-      // Fallback to Formspree
       return await this.sendViaFormspree(emailContent);
     } catch (error) {
       logger.error('Error sending immediate alert email:', error);
@@ -29,45 +23,8 @@ export class EmailService {
     }
   }
 
-
   /**
-   * Send via Web3Forms
-   */
-  async sendViaWeb3Forms(emailContent) {
-    try {
-      // Use URLSearchParams for Node.js compatibility
-      const formData = new URLSearchParams();
-      formData.append('access_key', this.web3FormsKey);
-      formData.append('email', this.recipientEmail);
-      formData.append('subject', emailContent.subject);
-      formData.append('message', emailContent.html);
-      formData.append('from_name', 'TradingView Alert System');
-
-      const response = await fetch('https://api.web3forms.com/submit', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: formData.toString()
-      });
-
-      const data = await response.json();
-
-      if (response.ok && data.success) {
-        logger.info('✅ Email sent successfully via Web3Forms');
-        return true;
-      } else {
-        logger.warn('❌ Web3Forms error:', data);
-        return false;
-      }
-    } catch (error) {
-      logger.error('❌ Web3Forms request failed:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Send via Formspree (fallback)
+   * Send via Formspree
    */
   async sendViaFormspree(emailContent) {
     try {

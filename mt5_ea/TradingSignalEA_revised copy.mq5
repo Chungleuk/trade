@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| trading9.mq5 |
-//| Copyright 2025, Your Company |
+//| Copyright 2026, Gary Lee |
 //| https://www.yourcompany.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Company"

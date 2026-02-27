@@ -120,6 +120,7 @@ async function fetchPendingSignals() {
     stop: signal.stop,
     timeframe: signal.timeframe,
     risk: signal.risk,
+    rr: signal.rr || '1',
     timestamp: signal.created_at
   }));
 
@@ -183,7 +184,9 @@ app.post('/signals/ack', async (req, res) => {
   console.log('Signal acknowledgment received:', req.body);
   const { signalId, status: ackStatus } = req.body;
 
-  if (signalId && (ackStatus === 'executed' || ackStatus === 'failed')) {
+  // Mark as completed only when executed; stopped for failed/expired/rejected
+  const terminalStatuses = ['executed', 'failed', 'expired', 'rejected'];
+  if (signalId && terminalStatuses.includes(ackStatus)) {
     try {
       const newStatus = ackStatus === 'executed' ? 'completed' : 'stopped';
       const { error } = await supabase

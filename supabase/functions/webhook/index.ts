@@ -14,39 +14,42 @@ interface TradingViewAlert {
 // Email notification function
 async function sendEmailNotification(alert: any) {
   try {
-    // Try EmailJS first (free service)
-    const emailJSResponse = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        service_id: "service_trading_alerts",
-        template_id: "template_alert",
-        user_id: "your_emailjs_user_id",
-        template_params: {
-          to_email: "leechungleuk@gmail.com",
-          subject: `📧 FIRST EMAIL - 🚨 Trading Alert: ${alert.action} ${alert.symbol}`,
-          alert_action: alert.action,
-          alert_symbol: alert.symbol,
-          alert_entry: alert.entry,
-          alert_timeframe: alert.timeframe || "15",
-          alert_target: alert.target || "N/A",
-          alert_stop: alert.stop || "N/A",
-          alert_rr: alert.rr || "N/A",
-          alert_risk: alert.risk || "0.65%",
-          alert_time: new Date().toLocaleString(),
-          raw_message: alert.rawMessage || JSON.stringify(alert)
-        }
-      }),
-    });
+    // Try EmailJS first if configured (skip if placeholder)
+    const emailJsUserId = Deno.env.get("EMAILJS_USER_ID") || "";
+    if (emailJsUserId && !emailJsUserId.includes("your_")) {
+      const emailJSResponse = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          service_id: Deno.env.get("EMAILJS_SERVICE_ID") || "service_trading_alerts",
+          template_id: Deno.env.get("EMAILJS_TEMPLATE_ID") || "template_alert",
+          user_id: emailJsUserId,
+          template_params: {
+            to_email: Deno.env.get("ALERT_EMAIL") || "leechungleuk@gmail.com",
+            subject: `📧 FIRST EMAIL - 🚨 Trading Alert: ${alert.action} ${alert.symbol}`,
+            alert_action: alert.action,
+            alert_symbol: alert.symbol,
+            alert_entry: alert.entry,
+            alert_timeframe: alert.timeframe || "15",
+            alert_target: alert.target || "N/A",
+            alert_stop: alert.stop || "N/A",
+            alert_rr: alert.rr || "N/A",
+            alert_risk: alert.risk || "0.65%",
+            alert_time: new Date().toLocaleString(),
+            raw_message: alert.rawMessage || JSON.stringify(alert)
+          }
+        }),
+      });
 
-    if (emailJSResponse.ok) {
-      console.log("Email sent successfully via EmailJS");
-      return true;
+      if (emailJSResponse.ok) {
+        console.log("Email sent successfully via EmailJS");
+        return true;
+      }
     }
 
-    // Fallback to webhook-based email
+    // Formspree fallback (or primary if EmailJS not configured)
     return await sendWebhookEmail(alert);
   } catch (error) {
     console.error("Error sending email:", error);
@@ -54,20 +57,20 @@ async function sendEmailNotification(alert: any) {
   }
 }
 
-// Webhook-based email using a simple service
+// Webhook-based email using Formspree
 async function sendWebhookEmail(alert: any) {
   try {
-    // Using a simple email webhook service (like Formspree or similar)
-    const emailWebhookUrl = "https://formspree.io/f/xpznvqko"; // Free email service
-    
-    const response = await fetch(emailWebhookUrl, {
+    const formspreeUrl = Deno.env.get("FORMSPREE_URL") || "https://formspree.io/f/xpznvqko";
+    const recipientEmail = Deno.env.get("ALERT_EMAIL") || "leechungleuk@gmail.com";
+
+    const response = await fetch(formspreeUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Accept": "application/json"
       },
       body: JSON.stringify({
-        email: "leechungleuk@gmail.com",
+        email: recipientEmail,
         subject: `📧 FIRST EMAIL - 🚨 Trading Alert: ${alert.action} ${alert.symbol}`,
         message: `
 🚨 NEW TRADING ALERT 🚨
@@ -89,7 +92,7 @@ ${alert.rawMessage || JSON.stringify(alert, null, 2)}
 ---
 Sent from TradingView Alert Dashboard
         `,
-        _replyto: "leechungleuk@gmail.com",
+        _replyto: recipientEmail,
         _subject: `📧 FIRST EMAIL - 🚨 Trading Alert: ${alert.action} ${alert.symbol}`
       })
     });
@@ -107,351 +110,17 @@ Sent from TradingView Alert Dashboard
   }
 }
 
-// Final fallback - log the notification
+// Final fallback - log only (Formspree failed)
 async function sendSimpleNotification(alert: any) {
-  try {
-    // Use Web3Forms with your access key
-    const formData = new FormData();
-    formData.append("access_key", "a2927d87-5196-4690-a8dc-d06dcb7634f8");
-    formData.append("email", "leechungleuk@gmail.com");
-    formData.append("subject", `📧 FIRST EMAIL - 🚨 Trading Alert: ${alert.action} ${alert.symbol}`);
-    formData.append("message", `
-🚨 NEW TRADING ALERT 🚨
-
-Action: ${alert.action}
-Symbol: ${alert.symbol}
-Entry Price: ${alert.entry}
-Timeframe: ${alert.timeframe || "15"}m
-${alert.target ? `Target: ${alert.target}` : ''}
-${alert.stop ? `Stop Loss: ${alert.stop}` : ''}
-${alert.rr ? `Risk/Reward: ${alert.rr}` : ''}
- Risk: ${alert.risk || '0.65%'}
-
-Time: ${new Date().toLocaleString()}
-
-Original Message:
-${alert.rawMessage || JSON.stringify(alert, null, 2)}
-
----
-Sent from TradingView Alert Dashboard
-    `);
-    formData.append("from_name", "TradingView Alert System");
-    
-    const response = await fetch("https://api.web3forms.com/submit", {
-      method: "POST",
-      body: formData
-    });
-
-    const data = await response.json();
-    
-    if (response.ok) {
-      console.log("✅ Email sent successfully via Web3Forms:", data);
-      return true;
-    } else {
-      console.error("❌ Web3Forms error:", data);
-      return false;
-    }
-  } catch (error) {
-    console.error("❌ Web3Forms request failed:", error);
-    console.log("📧 ALERT NOTIFICATION (Email failed):", {
-      recipient: "leechungleuk@gmail.com",
-      alert: alert,
-      timestamp: new Date().toISOString()
-    });
-    return false;
-  }
-}
-
-// AI Analysis function
-async function performAIAnalysis(alertData: any): Promise<any | null> {
-  try {
-    // Use Poe.com API with Claude-3-Opus (same as your Python code)
-    const POE_API_KEY = Deno.env.get("POE_API_KEY") || "ljnJHoYE6g0Wc4HrhJFDjPRJWnYKw3_KgTjrwQjTznU";
-    const POE_BASE_URL = "https://api.poe.com/v1";
-    
-    const alertString = JSON.stringify(alertData, null, 2);
-    
-    const prompt = `Evaluate the trading signal with specific, definitive judgments. Provide:
-
-1. Clear assessment of whether entry, target, and stop align with the symbol's timeframe price action and trend (state "align" or "do not align" with rationale).  
-2. Explicit confirmation if the action (SELL/BUY) fits current market conditions (confirm "fits" or "does not fit" with reasoning).  
-3. Definitive win rate prediction (≥50% or <50%) with concrete justification tied to trend, price action, and risk-reward.  
-4. Confirmation of whether major market events/data releases are scheduled within 60 minutes could have a great impact on forex market/XAUUSD (state "yes" or "no" with specifics if applicable, with the name of event/incident).  
-
-Avoid conditional language. Base conclusions on observable trading principles. Summarize in 100 words and 200字繁體中文.
-
-Alert data:
-${alertString}
-
-Please respond in the following JSON format:
-{
-  "entryAlignment": "align|do not align",
-  "entryReasoning": "detailed reasoning",
-  "actionFit": "fits|does not fit", 
-  "actionReasoning": "detailed reasoning",
-  "winRatePrediction": "≥50%|<50%",
-  "winRateReasoning": "detailed reasoning",
-  "marketEvents": "yes|no",
-  "marketEventsDetails": "specific events if any",
-  "summary": "100 word summary in English",
-  "summaryChinese": "200字繁體中文總結",
-  "confidence": 85,
-  "recommendation": "strong_buy|buy|hold|sell|strong_sell"
-}`;
-
-    const response = await fetch(`${POE_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${POE_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'claude-3-opus',  // Use Claude-3-Opus like your Python code
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a helpful financial and trading assistant. Analyze based on the provided chart data and trading signal.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 1000
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Poe.com API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const content = data.choices[0]?.message?.content;
-    
-    if (!content) {
-      throw new Error('No content received from Poe.com API');
-    }
-
-    // Try to parse JSON response
-    try {
-      const analysis = JSON.parse(content);
-      return validateAnalysisResult(analysis);
-    } catch (parseError) {
-      // If JSON parsing fails, return fallback analysis
-      return generateFallbackAnalysis(alertData);
-    }
-
-  } catch (error) {
-    console.error('Poe.com API call failed:', error);
-    return generateFallbackAnalysis(alertData);
-  }
-}
-
-function validateAnalysisResult(data: any): any {
-  return {
-    entryAlignment: data.entryAlignment || 'do not align',
-    entryReasoning: data.entryReasoning || 'Analysis unavailable',
-    actionFit: data.actionFit || 'does not fit',
-    actionReasoning: data.actionReasoning || 'Analysis unavailable',
-    winRatePrediction: data.winRatePrediction || '<50%',
-    winRateReasoning: data.winRateReasoning || 'Analysis unavailable',
-    marketEvents: data.marketEvents || 'no',
-    marketEventsDetails: data.marketEventsDetails || 'No major events detected',
-    summary: data.summary || 'Analysis unavailable',
-    summaryChinese: data.summaryChinese || '分析不可用',
-    confidence: data.confidence || 50,
-    recommendation: data.recommendation || 'hold'
-  };
-}
-
-function generateFallbackAnalysis(alertData: any): any {
-  return {
-    entryAlignment: 'do not align',
-    entryReasoning: 'AI analysis service is currently unavailable due to API access issues, token limits, or service downtime. Please review this signal manually.',
-    actionFit: 'does not fit',
-    actionReasoning: 'Unable to analyze market conditions due to AI service unavailability. Manual review recommended.',
-    winRatePrediction: '<50%',
-    winRateReasoning: 'AI analysis unavailable. Please assess win probability based on your own technical and fundamental analysis.',
-    marketEvents: 'no',
-    marketEventsDetails: 'Unable to check for upcoming market events due to AI service unavailability.',
-    summary: `Trading alert received for ${alertData.symbol} ${alertData.action} at ${alertData.entry}. AI analysis service is currently unavailable due to technical issues. Please review this signal manually using your own analysis methods.`,
-    summaryChinese: `收到 ${alertData.symbol} ${alertData.action} 交易信號，入場價 ${alertData.entry}。AI分析服務目前因技術問題不可用。請使用您自己的分析方法手動審查此信號。`,
-    confidence: 0,
-    recommendation: 'hold'
-  };
-}
-
-// Enhanced email notification with AI analysis
-async function sendEnhancedEmailNotification(alert: any) {
-  try {
-    const confidenceColor = alert.aiAnalysis.confidence >= 70 ? '🟢' : alert.aiAnalysis.confidence >= 50 ? '🟡' : '🔴';
-    const recommendationEmoji = {
-      'strong_buy': '🚀',
-      'buy': '📈',
-      'hold': '⏸️',
-      'sell': '📉',
-      'strong_sell': '💥'
-    }[alert.aiAnalysis.recommendation] || '❓';
-
-    const emailContent = {
-      subject: `📧 SECOND EMAIL - ${recommendationEmoji} AI Analysis: ${alert.action} ${alert.symbol} - ${confidenceColor}${alert.aiAnalysis.confidence}% Confidence`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #333;">📧 SECOND EMAIL - AI Trading Analysis Report</h2>
-          <p style="color: #666; font-style: italic;">This is the follow-up email with AI analysis results (sent ~30 seconds after the initial alert)</p>
-          
-          <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0;">
-            <h3 style="margin-top: 0;">📊 Signal Details</h3>
-            <p><strong>Action:</strong> ${alert.action}</p>
-            <p><strong>Symbol:</strong> ${alert.symbol}</p>
-            <p><strong>Entry:</strong> ${alert.entry}</p>
-            <p><strong>Target:</strong> ${alert.target || 'N/A'}</p>
-            <p><strong>Stop:</strong> ${alert.stop || 'N/A'}</p>
-            <p><strong>Risk:</strong> ${alert.risk || '0.65%'}</p>
-            <p><strong>Timeframe:</strong> ${alert.timeframe || '15'}m</p>
-          </div>
-
-          <div style="background: #e8f5e8; padding: 15px; border-radius: 8px; margin: 15px 0;">
-            <h3 style="margin-top: 0;">🎯 AI Analysis Results</h3>
-            <p><strong>Confidence:</strong> ${confidenceColor} ${alert.aiAnalysis.confidence}%</p>
-            <p><strong>Recommendation:</strong> ${recommendationEmoji} ${alert.aiAnalysis.recommendation.replace('_', ' ').toUpperCase()}</p>
-            <p><strong>Entry Alignment:</strong> ${alert.aiAnalysis.entryAlignment === 'align' ? '✅' : '❌'} ${alert.aiAnalysis.entryAlignment}</p>
-            <p><strong>Action Fit:</strong> ${alert.aiAnalysis.actionFit === 'fits' ? '✅' : '❌'} ${alert.aiAnalysis.actionFit}</p>
-            <p><strong>Win Rate Prediction:</strong> ${alert.aiAnalysis.winRatePrediction}</p>
-            <p><strong>Market Events:</strong> ${alert.aiAnalysis.marketEvents === 'yes' ? '⚠️' : '✅'} ${alert.aiAnalysis.marketEvents}</p>
-          </div>
-
-          <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin: 15px 0;">
-            <h3 style="margin-top: 0;">📝 Detailed Analysis</h3>
-            <p><strong>Entry Reasoning:</strong> ${alert.aiAnalysis.entryReasoning}</p>
-            <p><strong>Action Reasoning:</strong> ${alert.aiAnalysis.actionReasoning}</p>
-            <p><strong>Win Rate Reasoning:</strong> ${alert.aiAnalysis.winRateReasoning}</p>
-            ${alert.aiAnalysis.marketEvents === 'yes' ? `<p><strong>Market Events:</strong> ${alert.aiAnalysis.marketEventsDetails}</p>` : ''}
-          </div>
-
-          <div style="background: #d1ecf1; padding: 15px; border-radius: 8px; margin: 15px 0;">
-            <h3 style="margin-top: 0;">📋 Summary</h3>
-            <p><strong>English:</strong> ${alert.aiAnalysis.summary}</p>
-            <hr style="border: 1px solid #ccc; margin: 10px 0;">
-            <p><strong>繁體中文:</strong> ${alert.aiAnalysis.summaryChinese}</p>
-          </div>
-
-          <div style="text-align: center; margin-top: 20px; color: #666; font-size: 12px;">
-            <p>🤖 Generated by AI Trading Analysis System</p>
-            <p>⏰ ${new Date().toLocaleString()}</p>
-          </div>
-        </div>
-      `,
-      text: `
-AI Trading Analysis Report
-
-Signal Details:
-- Action: ${alert.action}
-- Symbol: ${alert.symbol}
-- Entry: ${alert.entry}
-- Target: ${alert.target || 'N/A'}
-- Stop: ${alert.stop || 'N/A'}
-- Risk: ${alert.risk || '0.65%'}
-
-AI Analysis:
-- Confidence: ${alert.aiAnalysis.confidence}%
-- Recommendation: ${alert.aiAnalysis.recommendation}
-- Entry Alignment: ${alert.aiAnalysis.entryAlignment}
-- Action Fit: ${alert.aiAnalysis.actionFit}
-- Win Rate Prediction: ${alert.aiAnalysis.winRatePrediction}
-- Market Events: ${alert.aiAnalysis.marketEvents}
-
-Summary: ${alert.aiAnalysis.summary}
-
-繁體中文總結: ${alert.aiAnalysis.summaryChinese}
-
-Generated at: ${new Date().toLocaleString()}
-      `
-    };
-
-    // Try multiple email services for reliability
-    const services = [
-      sendViaWeb3Forms,
-      sendViaFormspree,
-      sendViaEmailJS
-    ];
-
-    for (const service of services) {
-      try {
-        const success = await service(emailContent);
-        if (success) {
-          console.log('Enhanced email sent successfully');
-          return true;
-        }
-      } catch (error) {
-        console.warn(`Enhanced email service failed:`, error);
-        continue;
-      }
-    }
-
-    console.error('All enhanced email services failed');
-    return false;
-  } catch (error) {
-    console.error('Enhanced email sending error:', error);
-    return false;
-  }
-}
-
-async function sendViaWeb3Forms(emailContent: any): Promise<boolean> {
-  const formData = new FormData();
-  formData.append("access_key", "a2927d87-5196-4690-a8dc-d06dcb7634f8");
-  formData.append("email", "leechungleuk@gmail.com");
-  formData.append("subject", emailContent.subject);
-  formData.append("message", emailContent.text);
-  formData.append("from_name", "AI Trading Analysis System");
-  
-  const response = await fetch("https://api.web3forms.com/submit", {
-    method: "POST",
-    body: formData
+  const recipient = Deno.env.get("ALERT_EMAIL") || "leechungleuk@gmail.com";
+  console.log("📧 Email fallback: Formspree failed. Alert logged (no email sent):", {
+    action: alert.action,
+    symbol: alert.symbol,
+    entry: alert.entry,
+    recipient,
+    timestamp: new Date().toISOString()
   });
-
-  return response.ok;
-}
-
-async function sendViaFormspree(emailContent: any): Promise<boolean> {
-  const response = await fetch("https://formspree.io/f/xpznvqko", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json"
-    },
-    body: JSON.stringify({
-      email: "leechungleuk@gmail.com",
-      subject: emailContent.subject,
-      message: emailContent.text,
-      _replyto: "leechungleuk@gmail.com"
-    })
-  });
-
-  return response.ok;
-}
-
-async function sendViaEmailJS(emailContent: any): Promise<boolean> {
-  const response = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      service_id: "service_trading_alerts",
-      template_id: "template_ai_analysis",
-      user_id: "your_emailjs_user_id",
-      template_params: {
-        to_email: "leechungleuk@gmail.com",
-        subject: emailContent.subject,
-        html_content: emailContent.html,
-        text_content: emailContent.text
-      }
-    }),
-  });
-
-  return response.ok;
+  return false;
 }
 
 const corsHeaders = {
@@ -497,21 +166,40 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Parse the incoming webhook data
+    // Parse the incoming webhook data (TradingView: application/json or text/plain, 3s timeout)
     let alertData: any;
     const contentType = req.headers.get("content-type") || "";
     
     if (contentType.includes("application/json")) {
-      alertData = await req.json();
+      try {
+        alertData = await req.json();
+      } catch (e) {
+        console.error("JSON parse error:", e);
+        return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
     } else {
-      // Handle text/plain or other formats (TradingView sometimes sends as text)
       const textData = await req.text();
+      if (!textData || !textData.trim()) {
+        return new Response(JSON.stringify({ error: "Empty request body" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
       try {
         alertData = JSON.parse(textData);
       } catch {
-        // If it's not JSON, treat it as a raw message
         alertData = { message: textData };
       }
+    }
+
+    if (!alertData || (typeof alertData === "object" && Object.keys(alertData).length === 0)) {
+      return new Response(JSON.stringify({ error: "Empty alert data" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     console.log("Received webhook data:", alertData);
@@ -536,27 +224,10 @@ Deno.serve(async (req: Request) => {
     const { createClient } = await import("npm:@supabase/supabase-js@2");
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Insert the alert into the database
-    // POSITION_SIZING_MODE: "global" (all pairs share W-L) or "per_pair" (each pair independent)
-    const sizingMode = (Deno.env.get("POSITION_SIZING_MODE") || "global").toLowerCase();
-    const groupKey = sizingMode === "per_pair" ? (parsedAlert.symbol || "UNKNOWN").toUpperCase() : "GLOBAL";
-    let riskPercent = '0.65';
-    try {
-      const { data: state } = await supabase
-        .from('position_sizing_state')
-        .select('*')
-        .eq('group_key', groupKey)
-        .maybeSingle();
-      const node = state?.current_node || 'Start';
-      const map: Record<string, number> = {
-        'Start': 0.65, '1-0': 0.58, '0-1': 0.73, '2-0': 0.44, '1-1': 0.73, '0-2': 0.73,
-        '3-0': 0.25, '2-1': 0.62, '1-2': 0.83, '0-3': 0.62, '4-0': 0.08, '3-1': 0.41,
-        '2-2': 0.83, '1-3': 0.83, '0-4': 0.41, '4-1': 0.17, '3-2': 0.66, '2-3': 0.99,
-        '1-4': 0.66, '0-5': 0.17, '4-2': 0.33, '3-3': 0.99, '2-4': 0.99, '1-5': 0.33,
-        '4-3': 0.66, '3-4': 1.33, '2-5': 0.66, '4-4': 1.33, '3-5': 1.33, '4-5': 2.65,
-      };
-      riskPercent = (map[node] ?? 0.65).toFixed(2);
-    } catch {}
+    // Use risk from alert if valid (0.01-100), else default. Position sizing updates in background.
+    const riskFromAlert = parsedAlert.risk ? String(parsedAlert.risk).replace(/%/g, "").trim() : "";
+    const parsedRisk = /^\d+(\.\d+)?$/.test(riskFromAlert) ? parseFloat(riskFromAlert) : 0.65;
+    const riskPercent = (parsedRisk >= 0.01 && parsedRisk <= 100) ? parsedRisk.toFixed(2) : "0.65";
 
     const { data, error } = await supabase
       .from("trading_alerts")
@@ -589,27 +260,42 @@ Deno.serve(async (req: Request) => {
 
     console.log("Alert saved successfully:", data);
 
-    // STEP 1: Send immediate email notification (basic alert info)
-    let immediateEmailSent = false;
-    try {
-      await sendEmailNotification({
-        action: parsedAlert.action,
-        symbol: parsedAlert.symbol,
-        entry: parsedAlert.entry,
-        target: parsedAlert.target,
-        stop: parsedAlert.stop,
-        rr: parsedAlert.rr,
-        timeframe: parsedAlert.timeframe || "15",
-        risk: `${riskPercent}%`,
-        rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
-      });
-      immediateEmailSent = true;
-      console.log("✅ Immediate email notification sent successfully");
-    } catch (immediateEmailError) {
-      console.error("❌ Immediate email failed:", immediateEmailError);
-      // Try fallback email service
+    // Return 200 IMMEDIATELY to TradingView (must respond within 3 seconds)
+    // Email runs in background - do NOT await before responding
+    const responsePayload = {
+      success: true,
+      message: "Alert received and saved. Email notification running in background.",
+      alert: data,
+    };
+
+    // STEP 0: Update risk from position_sizing_state in background (non-blocking)
+    (async () => {
       try {
-        await sendSimpleNotification({
+        const sizingMode = (Deno.env.get("POSITION_SIZING_MODE") || "global").toLowerCase();
+        const groupKey = sizingMode === "per_pair" ? (parsedAlert.symbol || "UNKNOWN").toUpperCase() : "GLOBAL";
+        const { data: state } = await supabase.from('position_sizing_state').select('*').eq('group_key', groupKey).maybeSingle();
+        const node = state?.current_node || 'Start';
+        const map: Record<string, number> = {
+          'Start': 0.65, '1-0': 0.58, '0-1': 0.73, '2-0': 0.44, '1-1': 0.73, '0-2': 0.73,
+          '3-0': 0.25, '2-1': 0.62, '1-2': 0.83, '0-3': 0.62, '4-0': 0.08, '3-1': 0.41,
+          '2-2': 0.83, '1-3': 0.83, '0-4': 0.41, '4-1': 0.17, '3-2': 0.66, '2-3': 0.99,
+          '1-4': 0.66, '0-5': 0.17, '4-2': 0.33, '3-3': 0.99, '2-4': 0.99, '1-5': 0.33,
+          '4-3': 0.66, '3-4': 1.33, '2-5': 0.66, '4-4': 1.33, '3-5': 1.33, '4-5': 2.65,
+        };
+        const computedRisk = (map[node] ?? 0.65).toFixed(2);
+        if (computedRisk !== riskPercent) {
+          await supabase.from("trading_alerts").update({ risk: computedRisk }).eq("id", data.id);
+          console.log("✅ Position sizing risk updated:", computedRisk);
+        }
+      } catch (e) {
+        console.warn("Position sizing background update skipped:", e);
+      }
+    })();
+
+    // STEP 1: Send immediate email in background (non-blocking)
+    (async () => {
+      try {
+        const sent = await sendEmailNotification({
           action: parsedAlert.action,
           symbol: parsedAlert.symbol,
           entry: parsedAlert.entry,
@@ -620,81 +306,39 @@ Deno.serve(async (req: Request) => {
           risk: `${riskPercent}%`,
           rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
         });
-        immediateEmailSent = true;
-        console.log("✅ Fallback immediate email sent successfully");
-      } catch (fallbackError) {
-        console.error("❌ All immediate email methods failed:", fallbackError);
-      }
-    }
-
-    // STEP 2: Start AI analysis in background (non-blocking)
-    // This will send a second email with analysis results when complete
-    (async () => {
-      try {
-        console.log("🤖 Starting AI analysis in background...");
-        const analysisResult = await performAIAnalysis({
-          id: data.id,
+        if (sent) {
+          console.log("✅ Email notification sent successfully");
+        } else {
+          sendSimpleNotification({
+            action: parsedAlert.action,
+            symbol: parsedAlert.symbol,
+            entry: parsedAlert.entry,
+            target: parsedAlert.target,
+            stop: parsedAlert.stop,
+            rr: parsedAlert.rr,
+            timeframe: parsedAlert.timeframe || "15",
+            risk: `${riskPercent}%`,
+            rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
+          });
+        }
+      } catch (immediateEmailError) {
+        console.error("❌ Email failed:", immediateEmailError);
+        sendSimpleNotification({
           action: parsedAlert.action,
           symbol: parsedAlert.symbol,
-          timeframe: parsedAlert.timeframe || "15",
           entry: parsedAlert.entry,
           target: parsedAlert.target,
           stop: parsedAlert.stop,
           rr: parsedAlert.rr,
+          timeframe: parsedAlert.timeframe || "15",
           risk: `${riskPercent}%`,
-          timestamp: data.created_at
+          rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
         });
-
-        if (analysisResult) {
-          // Update the alert with analysis results
-          try {
-            await supabase
-              .from("trading_alerts")
-              .update({
-                ai_analysis: analysisResult,
-                analysis_performed: true,
-                analysis_timestamp: new Date().toISOString()
-              })
-              .eq("id", data.id);
-            console.log("✅ AI analysis saved to database");
-          } catch (dbError) {
-            console.error("❌ Failed to update alert with AI analysis:", dbError);
-          }
-
-          // Send second email with AI analysis results
-          try {
-            await sendEnhancedEmailNotification({
-              action: parsedAlert.action,
-              symbol: parsedAlert.symbol,
-              entry: parsedAlert.entry,
-              target: parsedAlert.target,
-              stop: parsedAlert.stop,
-              rr: parsedAlert.rr,
-              timeframe: parsedAlert.timeframe || "15",
-              risk: `${riskPercent}%`,
-              rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData),
-              aiAnalysis: analysisResult
-            });
-            console.log("✅ Second email with AI analysis sent successfully");
-          } catch (enhancedEmailError) {
-            console.error("❌ Second email with AI analysis failed:", enhancedEmailError);
-          }
-        } else {
-          console.log("⚠️ AI analysis returned null, no second email sent");
-        }
-      } catch (analysisError) {
-        console.error("❌ AI analysis failed:", analysisError);
-        // No second email sent if AI analysis fails
       }
     })();
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: "Alert received, saved, and immediate email sent. AI analysis started in background.",
-        alert: data,
-        immediateEmailSent: immediateEmailSent
-      }),
+      JSON.stringify(responsePayload),
       {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -720,12 +364,12 @@ function parseAlert(rawData: any): any | null {
     if (isValidJsonAlert(rawData)) {
       return {
         id: rawData.id || generateAlertId(),
-        action: rawData.action.toUpperCase(),
-        symbol: rawData.symbol.toUpperCase(),
+        action: rawData.action.toString().toUpperCase(),
+        symbol: rawData.symbol.toString().toUpperCase(),
         timeframe: rawData.timeframe || "15",
-        entry: rawData.entry,
-        target: rawData.target,
-        stop: rawData.stop,
+        entry: String(rawData.entry),
+        target: rawData.target != null ? String(rawData.target) : null,
+        stop: rawData.stop != null ? String(rawData.stop) : null,
         rr: rawData.rr,
         risk: rawData.risk,
         rawMessage: JSON.stringify(rawData),
@@ -751,14 +395,12 @@ function parseAlert(rawData: any): any | null {
 }
 
 function isValidJsonAlert(data: any): boolean {
-  return (
-    typeof data === "object" &&
-    data !== null &&
-    typeof data.action === "string" &&
-    (data.action.toUpperCase() === "BUY" || data.action.toUpperCase() === "SELL") &&
-    typeof data.symbol === "string" &&
-    typeof data.entry === "string"
-  );
+  if (typeof data !== "object" || data === null) return false;
+  const action = data.action?.toString().toUpperCase();
+  if (action !== "BUY" && action !== "SELL") return false;
+  if (data.symbol == null || (typeof data.symbol !== "string" && typeof data.symbol !== "number")) return false;
+  const entry = data.entry;
+  return entry !== undefined && entry !== null && (typeof entry === "string" || typeof entry === "number");
 }
 
 function parseTradingViewMessage(message: string): any | null {
@@ -803,14 +445,16 @@ function parseGenericObject(data: any): any | null {
     return null;
   }
 
+  const target = data.target ?? data.tp;
+  const stop = data.stop ?? data.sl;
   return {
     id: data.id || generateAlertId(),
     action,
     symbol: symbol.toUpperCase(),
     timeframe: data.timeframe || data.tf || "15",
     entry,
-    target: data.target || data.tp,
-    stop: data.stop || data.sl,
+    target: target != null ? String(target) : null,
+    stop: stop != null ? String(stop) : null,
     rr: data.rr || data.risk_reward,
     risk: data.risk,
     rawMessage: JSON.stringify(data),
@@ -835,8 +479,8 @@ function extractSymbol(data: any): string | null {
   const symbolFields = ["symbol", "ticker", "instrument", "pair"];
   
   for (const field of symbolFields) {
-    if (data[field] && typeof data[field] === "string") {
-      return data[field];
+    if (data[field] != null && (typeof data[field] === "string" || typeof data[field] === "number")) {
+      return String(data[field]);
     }
   }
   

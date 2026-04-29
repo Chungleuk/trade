@@ -1,3 +1,5 @@
+# Required env vars (set in Netlify UI → Environment variables): VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
+# Optional: VITE_BACKEND_URL
 [build]
   command = "npm run build"
   publish = "dist"

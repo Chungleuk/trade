@@ -2,7 +2,8 @@ import { supabase } from '../lib/supabase';
 import { TradingAlert } from '../types/alert';
 import { Database } from '../lib/database.types';
 import { AlertParsingService } from './alertParsingService';
-import { getCurrentNode, getRiskPercentForNode } from './positionSizingService';
+import { getPositionSizingMode, resolveSizingGroupKey } from '../lib/positionSizingMode';
+import { getCurrentNode, getGroupKeyForSymbol, getRiskPercentForNode, syncPositionSizingStateFromAlerts } from './positionSizingService';
 
 type AlertRow = Database['public']['Tables']['trading_alerts']['Row'];
 type AlertInsert = Database['public']['Tables']['trading_alerts']['Insert'];
@@ -34,7 +35,7 @@ const mapAlertToInsert = (alert: Omit<TradingAlert, 'timestamp'>): AlertInsert =
   action: alert.action,
   symbol: alert.symbol,
   timeframe: alert.timeframe,
-  entry: alert.entry,
+  entry: alert.entry ?? '',
   target: alert.target || null,
   stop: alert.stop || null,
   rr: alert.rr || null,
@@ -43,6 +44,7 @@ const mapAlertToInsert = (alert: Omit<TradingAlert, 'timestamp'>): AlertInsert =
   message: alert.rawMessage || alert.message || null,
   status: alert.status || 'active',
   outcome: alert.outcome || null,
+  ...(alert.createdAt ? { created_at: alert.createdAt } : {}),
 });
 
 export class AlertService {
@@ -98,10 +100,11 @@ export class AlertService {
   // Create a new alert
   static async createAlert(alert: Omit<TradingAlert, 'timestamp'>): Promise<{ data: TradingAlert | null; error: string | null }> {
     try {
-      // Read risk% from GLOBAL position_sizing_state (matches backend mode)
+      // Group key: GLOBAL (default) or per-symbol — see dashboard “Risk ladder” toggle
       let riskPercent = '0.65';
       try {
-        const node = await getCurrentNode('GLOBAL');
+        const groupKey = resolveSizingGroupKey(alert.symbol, getPositionSizingMode());
+        const node = await getCurrentNode(groupKey);
         riskPercent = getRiskPercentForNode(node).toFixed(2);
       } catch {
         console.warn('Failed to read position sizing state, using default 0.65%');
@@ -285,11 +288,14 @@ export class AlertService {
   static async deleteAlert(alertId: string): Promise<{ error: string | null }> {
     try {
       console.log('Attempting to delete alert:', alertId);
-      
-      const { error } = await supabase
+
+      const { data: row } = await supabase
         .from('trading_alerts')
-        .delete()
-        .eq('id', alertId);
+        .select('symbol')
+        .eq('id', alertId)
+        .maybeSingle();
+
+      const { error } = await supabase.from('trading_alerts').delete().eq('id', alertId);
 
       if (error) {
         console.error('Error deleting alert:', error);
@@ -297,6 +303,21 @@ export class AlertService {
       }
 
       console.log('Alert deleted successfully:', alertId);
+
+      const mode = getPositionSizingMode();
+      try {
+        if (mode === 'global') {
+          await syncPositionSizingStateFromAlerts({ mode: 'global' });
+        } else if (row?.symbol) {
+          await syncPositionSizingStateFromAlerts({
+            mode: 'per_pair',
+            symbolUpper: getGroupKeyForSymbol(row.symbol),
+          });
+        }
+      } catch (syncErr) {
+        console.warn('Position sizing sync after delete failed:', syncErr);
+      }
+
       return { error: null };
     } catch (error) {
       console.error('Error in deleteAlert:', error);
@@ -339,6 +360,21 @@ export class AlertService {
       }
 
       console.log(`Successfully deleted ${count} alert(s) for symbol:`, symbol);
+
+      const mode = getPositionSizingMode();
+      try {
+        if (mode === 'global') {
+          await syncPositionSizingStateFromAlerts({ mode: 'global' });
+        } else {
+          await syncPositionSizingStateFromAlerts({
+            mode: 'per_pair',
+            symbolUpper: symbol.toUpperCase(),
+          });
+        }
+      } catch (syncErr) {
+        console.warn('Position sizing sync after bulk delete failed:', syncErr);
+      }
+
       return { deletedCount: count, error: null };
     } catch (error) {
       console.error('Error in deleteAlertsBySymbol:', error);

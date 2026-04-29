@@ -42,7 +42,7 @@ export const SetupInstructions: React.FC = () => {
             </li>
             <li className="flex items-start gap-3">
               <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-medium">3</span>
-              <span>Paste the webhook URL from the "Simple Webhook Setup" section above</span>
+              <span>Paste the webhook URL from the Alerts tab (“Webhook / JSON test”)</span>
             </li>
             <li className="flex items-start gap-3">
               <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-medium">4</span>
@@ -62,7 +62,8 @@ export const SetupInstructions: React.FC = () => {
             </pre>
           </div>
           <p className="text-sm text-gray-600">
-            You can customize the fields based on your trading strategy. Required fields are <code className="bg-gray-100 px-1 rounded">action</code>, <code className="bg-gray-100 px-1 rounded">symbol</code>, and <code className="bg-gray-100 px-1 rounded">entry</code>.
+            Only <code className="bg-gray-100 px-1 rounded">action</code> and <code className="bg-gray-100 px-1 rounded">symbol</code> are required.
+            <code className="bg-gray-100 px-1 rounded">entry</code>, <code className="bg-gray-100 px-1 rounded">target</code>, and <code className="bg-gray-100 px-1 rounded">stop</code> are optional.
           </p>
         </div>
 
@@ -86,7 +87,7 @@ export const SetupInstructions: React.FC = () => {
             <div>
               <h4 className="font-medium text-blue-900 mb-1">Ready to Receive Alerts</h4>
               <p className="text-blue-800 text-sm">
-                Your webhook endpoint is now live and can receive POST requests from TradingView. Alerts will automatically appear in your dashboard in real-time and an email notification will be sent to <strong>leechungleuk@gmail.com</strong>. You can also manually submit alerts using the form above for testing.
+                On the <strong>Alerts</strong> tab, use the header <strong>Risk ladder</strong> toggle (<strong>Global</strong> vs <strong>Per symbol</strong>), <strong>Manual signal</strong>, or <strong>Webhook / JSON test</strong>. TradingView webhooks appear in real time; email notifications go to <strong>leechungleuk@gmail.com</strong>.
               </p>
             </div>
           </div>

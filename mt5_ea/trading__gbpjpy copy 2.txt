@@ -132,7 +132,7 @@ loss_color = input.color(#ff0000, "LOSS Color", group=G_SIGNAL)
 
 // Advanced Filter Settings
 volumeConfirmation = input.bool(true, "Require Volume Confirmation", group=G_ADV)
-minVolumeIncrease = input.float(1.8, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.1, group=G_ADV, tooltip="Stricter volume confirmation for higher-quality setups")
+minVolumeIncrease = input.float(1.8, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.01, group=G_ADV, tooltip="Stricter volume confirmation for higher-quality setups")
 useTrendFilter = input.bool(true, "Use Trend Filter", group=G_ADV)
 useVolatilityFilter = input.bool(true, "Use Volatility Filter", group=G_ADV)
 minVolatilityPercentile = input.int(30, "Min Volatility Percentile", minval=0, maxval=100, group=G_ADV, tooltip="30 for GBPJPY - pair is inherently volatile, allow more trades")

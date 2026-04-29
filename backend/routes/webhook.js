@@ -62,9 +62,12 @@ router.post('/tradingview', validateWebhook, async (req, res) => {
     const signalData = req.body;
     logger.info('Received TradingView webhook', { signalData });
     
-    // Validate required fields
-    const requiredFields = ['action', 'symbol', 'entry'];
-    const missingFields = requiredFields.filter(field => !signalData[field]);
+    // Validate required fields (entry / target / stop optional)
+    const requiredFields = ['action', 'symbol'];
+    const missingFields = requiredFields.filter(field => {
+      const v = signalData[field];
+      return v == null || v === '';
+    });
     
     if (missingFields.length > 0) {
       logger.warn('Missing required fields', { missingFields });
@@ -80,13 +83,19 @@ router.post('/tradingview', validateWebhook, async (req, res) => {
       riskPercent = typeof signalData.risk === 'string' ? signalData.risk : `${signalData.risk}%`;
     }
 
+    const entryRaw = signalData.entry;
+    const entryNum =
+      entryRaw != null && entryRaw !== ''
+        ? parseFloat(String(entryRaw), 10)
+        : null;
+
     // Prepare alert data
     const alertData = {
       action: signalData.action.toUpperCase(),
       symbol: signalData.symbol.toUpperCase(),
-      entry: parseFloat(signalData.entry),
-      target: signalData.target ? parseFloat(signalData.target) : null,
-      stop: signalData.stop ? parseFloat(signalData.stop) : null,
+      entry: Number.isFinite(entryNum) ? entryNum : '',
+      target: signalData.target ? parseFloat(String(signalData.target), 10) : null,
+      stop: signalData.stop ? parseFloat(String(signalData.stop), 10) : null,
       timeframe: signalData.timeframe || '15',
       rr: signalData.rr || null,
       risk: riskPercent,

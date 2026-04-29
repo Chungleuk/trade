@@ -34,14 +34,17 @@ export class AlertParsingService {
    * Check if the data is a valid JSON alert format
    */
   private static isValidJsonAlert(data: any): boolean {
-    return (
-      typeof data === 'object' &&
-      data !== null &&
-      typeof data.action === 'string' &&
-      (data.action === 'BUY' || data.action === 'SELL') &&
-      typeof data.symbol === 'string' &&
-      typeof data.entry === 'string'
-    );
+    if (typeof data !== 'object' || data === null) return false;
+    if (typeof data.action !== 'string' || (data.action !== 'BUY' && data.action !== 'SELL')) return false;
+    if (typeof data.symbol !== 'string') return false;
+    if (
+      data.entry != null &&
+      typeof data.entry !== 'string' &&
+      typeof data.entry !== 'number'
+    ) {
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -53,7 +56,7 @@ export class AlertParsingService {
       action: data.action.toUpperCase() as 'BUY' | 'SELL',
       symbol: data.symbol.toUpperCase(),
       timeframe: data.timeframe || '15',
-      entry: data.entry,
+      entry: data.entry != null ? String(data.entry) : '',
       target: data.target,
       stop: data.stop,
       rr: data.rr,
@@ -118,7 +121,7 @@ export class AlertParsingService {
     const symbol = this.extractSymbol(data);
     const entry = this.extractEntry(data);
 
-    if (!action || !symbol || !entry) {
+    if (!action || !symbol) {
       return null;
     }
 
@@ -127,7 +130,7 @@ export class AlertParsingService {
       action,
       symbol: symbol.toUpperCase(),
       timeframe: data.timeframe || data.tf || '15',
-      entry,
+      entry: entry ?? '',
       target: data.target || data.tp,
       stop: data.stop || data.sl,
       rr: data.rr || data.risk_reward,
@@ -186,20 +189,157 @@ export class AlertParsingService {
   }
 
   /**
-   * Generate a unique alert ID
+   * Generate a unique alert ID (for new alerts / manual entry)
    */
-  private static generateAlertId(): string {
+  static generateAlertId(): string {
     return `alert_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  /**
+   * Parse analyst-style multi-line pastes, e.g.
+   * "XAUUSD, 29/4/2026\nSELL\nTarget: 4633.418\nStop Loss: 4670.115"
+   */
+  static parseManualPaste(text: string): {
+    symbol?: string;
+    action?: 'BUY' | 'SELL';
+    entry?: string;
+    target?: string;
+    stop?: string;
+    createdAt?: string;
+    warnings: string[];
+  } {
+    const warnings: string[] = [];
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return { warnings: ['Nothing to parse'] };
+    }
+
+    let createdAt: string | undefined;
+
+    const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const firstLine = lines[0] ?? '';
+
+    const commaParts = firstLine.split(',').map((p) => p.trim()).filter(Boolean);
+    let symbol: string | undefined;
+    if (commaParts.length >= 1 && /^[A-Za-z][A-Za-z0-9]{2,11}$/.test(commaParts[0])) {
+      symbol = commaParts[0].toUpperCase();
+      if (commaParts.length >= 2 && commaParts[1].toLowerCase() !== 'date') {
+        const parsed = this.parseLooseDateTime(commaParts[1]);
+        if (parsed) createdAt = parsed;
+        else warnings.push(`Could not parse date: "${commaParts[1]}"`);
+      }
+    }
+
+    if (!symbol) {
+      const symMatch = trimmed.match(
+        /\b([A-Z]{6}|XAUUSD|XAGUSD|BTCUSD|ETHUSD|US30|NAS100)\b/i
+      );
+      if (symMatch) symbol = symMatch[1].toUpperCase();
+    }
+
+    let action: 'BUY' | 'SELL' | undefined;
+    const actionLine = lines.find((l) => /^(BUY|SELL)$/i.test(l));
+    if (actionLine) {
+      action = actionLine.toUpperCase() as 'BUY' | 'SELL';
+    } else {
+      const actionM = trimmed.match(/\b(BUY|SELL)\b/i);
+      if (actionM) action = actionM[1].toUpperCase() as 'BUY' | 'SELL';
+    }
+
+    const targetM = trimmed.match(/target\s*:\s*([-+]?[\d.]+)/i);
+    const stopM = trimmed.match(/stop\s*loss\s*:\s*([-+]?[\d.]+)/i);
+    const entryM = trimmed.match(/entry\s*:\s*([-+]?[\d.]+)/i);
+    const tpM = trimmed.match(/\bTP\s*:\s*([-+]?[\d.]+)/i);
+    const slM = trimmed.match(/\bSL\s*:\s*([-+]?[\d.]+)/i);
+
+    let target = targetM?.[1] ?? tpM?.[1];
+    let stop = stopM?.[1] ?? slM?.[1];
+    let entry = entryM?.[1];
+
+    if (!createdAt) {
+      const dateLine = trimmed.match(
+        /(?:^|\n)\s*(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})(?:\s+(\d{1,2}):(\d{2}))?/m
+      );
+      if (dateLine) {
+        const combined =
+          dateLine[2] != null
+            ? `${dateLine[1]} ${dateLine[2]}:${dateLine[3]}`
+            : dateLine[1];
+        const parsed = this.parseLooseDateTime(combined);
+        if (parsed) createdAt = parsed;
+      }
+    }
+
+    if (target && stop && !entry) {
+      const t = parseFloat(target);
+      const s = parseFloat(stop);
+      if (!Number.isNaN(t) && !Number.isNaN(s)) {
+        entry = this.formatPriceEstimate((t + s) / 2);
+        warnings.push('Entry estimated as midpoint between target and stop — confirm before saving.');
+      }
+    }
+
+    if (!symbol) warnings.push('Symbol not detected — enter manually.');
+    if (!action) warnings.push('BUY/SELL not detected — choose manually.');
+
+    return { symbol, action, entry, target, stop, createdAt, warnings };
+  }
+
+  /** Reward:risk ratio from horizontal distances (same units as prices). */
+  static computeRR(
+    action: 'BUY' | 'SELL',
+    entry: string,
+    target: string,
+    stop: string
+  ): string | null {
+    const e = parseFloat(entry);
+    const t = parseFloat(target);
+    const s = parseFloat(stop);
+    if ([e, t, s].some((n) => Number.isNaN(n))) return null;
+    const riskDist = action === 'BUY' ? Math.abs(e - s) : Math.abs(s - e);
+    const rewardDist = action === 'BUY' ? Math.abs(t - e) : Math.abs(e - t);
+    if (riskDist <= 0) return null;
+    return (rewardDist / riskDist).toFixed(2);
+  }
+
+  private static formatPriceEstimate(n: number): string {
+    const s = n.toFixed(8).replace(/\.?0+$/, '');
+    return s || '0';
+  }
+
+  private static parseLooseDateTime(input: string): string | null {
+    const t = input.trim();
+    const iso = t.match(
+      /^(\d{4})-(\d{2})-(\d{2})(?:[T\s]+(\d{1,2}):(\d{2}))?/
+    );
+    if (iso) {
+      const y = parseInt(iso[1], 10);
+      const mo = parseInt(iso[2], 10);
+      const d = parseInt(iso[3], 10);
+      const hh = iso[4] != null ? parseInt(iso[4], 10) : 12;
+      const mm = iso[5] != null ? parseInt(iso[5], 10) : 0;
+      const dt = new Date(y, mo - 1, d, hh, mm, 0);
+      return dt.toISOString();
+    }
+    const dmy = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/);
+    if (!dmy) return null;
+    const d = parseInt(dmy[1], 10);
+    const mo = parseInt(dmy[2], 10);
+    const y = parseInt(dmy[3], 10);
+    const hh = dmy[4] != null ? parseInt(dmy[4], 10) : 12;
+    const mm = dmy[5] != null ? parseInt(dmy[5], 10) : 0;
+    const dt = new Date(y, mo - 1, d, hh, mm, 0);
+    return dt.toISOString();
   }
 
   /**
    * Validate that an alert has the minimum required fields
    */
   static validateAlert(alert: Partial<TradingAlert>): boolean {
+    const sym = typeof alert.symbol === 'string' ? alert.symbol.trim() : '';
     return !!(
       alert.action &&
-      alert.symbol &&
-      alert.entry &&
+      sym &&
       (alert.action === 'BUY' || alert.action === 'SELL')
     );
   }

@@ -66,11 +66,14 @@ export const SimpleWebhookDisplay: React.FC = () => {
 
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="mb-4">
         <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
           <Globe className="w-4 h-4" />
-          Webhook Setup
+          Webhook / JSON test
         </h2>
+        <p className="text-sm text-gray-600 mt-2">
+          Send a TradingView-style JSON body to your backend, or paste JSON here to insert via Supabase (same as webhook fields).
+        </p>
       </div>
 
       <div className="space-y-4">
@@ -107,12 +110,12 @@ export const SimpleWebhookDisplay: React.FC = () => {
           </button>
           
           <div className="flex items-center gap-2 flex-1 min-w-0">
-            <input
-              type="text"
-              placeholder="Paste alert JSON here..."
+            <textarea
+              placeholder='{"action":"SELL","symbol":"XAUUSD","timeframe":"15","target":"4633","stop":"4670"}'
               value={manualAlert}
               onChange={(e) => setManualAlert(e.target.value)}
-              className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+              rows={2}
+              className="flex-1 min-w-[12rem] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm font-mono"
             />
             <button
               onClick={handleManualSubmit}

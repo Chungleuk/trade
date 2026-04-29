@@ -3,11 +3,14 @@ export interface TradingAlert {
   action: 'BUY' | 'SELL';
   symbol: string;
   timeframe: string;
+  /** May be empty when journaling without a fill price */
   entry: string;
   target?: string;
   stop?: string;
   rr?: string;
   risk?: string;
+  /** ISO 8601; if set on insert-only payloads, stored as `created_at` for manual backdating */
+  createdAt?: string;
   timestamp: string;
   status?: 'active' | 'completed' | 'stopped';
   outcome?: 'win' | 'loss';

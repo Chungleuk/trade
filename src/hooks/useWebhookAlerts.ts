@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { TradingAlert, WebhookConfig } from '../types/alert';
 import { AlertService } from '../services/alertService';
 import { AlertParsingService } from '../services/alertParsingService';
-import { getGroupKeyForSymbol, getCurrentNode, getRiskPercentForNode, advanceNode, upsertNode } from '../services/positionSizingService';
+import { getPositionSizingMode, resolveSizingGroupKey } from '../lib/positionSizingMode';
+import { getCurrentNode, getRiskPercentForNode, advanceNode, upsertNode } from '../services/positionSizingService';
 
 export const useWebhookAlerts = () => {
   const [alerts, setAlerts] = useState<TradingAlert[]>([]);
@@ -200,7 +201,11 @@ export const useWebhookAlerts = () => {
   }, []);
 
   // Function to update alert outcome
-  const updateAlertOutcome = useCallback(async (alertId: string, outcome: 'win' | 'loss' | 'breakeven') => {
+  const updateAlertOutcome = useCallback(
+    async (
+      alertId: string,
+      outcome: 'win' | 'loss' | 'breakeven'
+    ): Promise<{ success: boolean; nextSuggestedRiskPercent?: string; pairKey?: string }> => {
     // Optimistic UI update - also set status to completed when marking outcome
     let previousAlert: TradingAlert | undefined;
     setAlerts(prev => prev.map(a => {
@@ -221,15 +226,17 @@ export const useWebhookAlerts = () => {
         // Revert on failure
         setAlerts(prev => prev.map(a => (a.id === alertId && previousAlert ? previousAlert : a)));
         // Do not set global error; caller will show a toast
-        return false;
+        return { success: false };
       }
 
-      // Update the GLOBAL position sizing node (all pairs share one W-L sequence)
+      let nextSuggestedRiskPercent: string | undefined;
+      let pairKey: string | undefined;
       try {
-        const groupKey = 'GLOBAL';
-        const currentNode = await getCurrentNode(groupKey);
+        pairKey = resolveSizingGroupKey(updatedAlert.symbol, getPositionSizingMode());
+        const currentNode = await getCurrentNode(pairKey);
         const nextNode = advanceNode(currentNode, outcome);
-        await upsertNode(groupKey, nextNode);
+        await upsertNode(pairKey, nextNode);
+        nextSuggestedRiskPercent = getRiskPercentForNode(nextNode).toFixed(2);
       } catch (e) {
         console.warn('Failed to advance position sizing node:', e);
       }
@@ -241,15 +248,17 @@ export const useWebhookAlerts = () => {
         const { data: fresh } = await AlertService.getAlerts({ limit: 100 });
         if (fresh && Array.isArray(fresh)) setAlerts(fresh);
       } catch {}
-      return true;
+      return { success: true, nextSuggestedRiskPercent, pairKey };
     } catch (err) {
       console.error('Error updating alert outcome:', err);
       // Revert on exception
       setAlerts(prev => prev.map(a => (a.id === alertId && previousAlert ? previousAlert : a)));
       // Do not set global error; caller will show a toast
-      return false;
+      return { success: false };
     }
-  }, []);
+  },
+  []);
+
 
   // Function to clear all alerts
   const clearAlerts = useCallback(() => {

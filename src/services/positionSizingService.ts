@@ -36,7 +36,8 @@ const decisionNodeToRiskPercent: Record<string, number> = {
 
 type Outcome = 'win' | 'loss' | 'breakeven';
 
-// Simple group mapping: group by base symbol (e.g., USDJPY => USDJPY, XAUUSD => XAUUSD)
+// Group key = normalized symbol (uppercase). With dashboard "Per symbol" mode, each pair is independent.
+// With "Global" mode, the app uses group_key GLOBAL instead (see src/lib/positionSizingMode.ts).
 export function getGroupKeyForSymbol(symbol: string): string {
   return symbol?.toUpperCase() ?? 'UNKNOWN';
 }
@@ -185,6 +186,7 @@ export async function cleanupOrphanedNodes(): Promise<void> {
     // Find orphaned states (no completed trades for this symbol)
     let deletedCount = 0;
     for (const state of allStates) {
+      if (state.group_key === 'GLOBAL') continue;
       if (!symbolsWithTrades.has(state.group_key)) {
         console.log(`[Position Sizing] Removing orphaned state for ${state.group_key} (no completed trades)`);
         const { error: deleteError } = await supabase
@@ -239,5 +241,48 @@ export function advanceNode(currentNode: string, outcome: Outcome): string {
   return currentNode; // breakeven keeps same node by default
 }
 
+/**
+ * Recompute position_sizing_state by replaying completed win/loss alerts (chronological).
+ * Call after deletes so removing an outcome-backed alert restores the correct node (e.g. back to Start / 0.65%).
+ */
+export async function syncPositionSizingStateFromAlerts(params: {
+  mode: 'global' | 'per_pair';
+  /** Uppercase symbol; required when mode is per_pair */
+  symbolUpper?: string;
+}): Promise<void> {
+  const { mode, symbolUpper } = params;
+  if (mode === 'per_pair' && !symbolUpper) {
+    console.warn('[Position Sizing] sync skipped: per_pair requires symbolUpper');
+    return;
+  }
 
+  let query = supabase
+    .from('trading_alerts')
+    .select('outcome, updated_at, id')
+    .eq('status', 'completed')
+    .in('outcome', ['win', 'loss']);
 
+  if (mode === 'per_pair') {
+    query = query.eq('symbol', symbolUpper!);
+  }
+
+  const { data: rows, error } = await query
+    .order('updated_at', { ascending: true })
+    .order('id', { ascending: true });
+
+  if (error) {
+    console.error('[Position Sizing] sync replay query failed:', error);
+    return;
+  }
+
+  let node: string = 'Start';
+  for (const row of rows || []) {
+    const o = row.outcome;
+    if (o === 'win' || o === 'loss') {
+      node = advanceNode(node, o);
+    }
+  }
+
+  const storageKey = mode === 'global' ? 'GLOBAL' : symbolUpper!;
+  await upsertNode(storageKey, node);
+}

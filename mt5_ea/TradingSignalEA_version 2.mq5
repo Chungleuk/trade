@@ -9,13 +9,15 @@
 #property description "Expert Advisor with fixed JSON parsing and dynamic risk sizing"
 
 //--- Input parameters
-input string ServerURL = "https://trading-backend-4v0f.onrender.com";
+input string ServerURL = "https://trading-backend-4v0f.onrender.com";   // Primary server (Render)
+input string ServerURL2 = "https://trade-production-613a.up.railway.app"; // Fallback server (Railway)
+input int DualServerTimeoutMs = 3000;  // Timeout per server when using both (ms); first to respond is used
 input double RiskPercent = 0.65;  // 💰⭐ Risk percentage per trade (e.g., 0.65 = 0.65%)
 input bool AutoExecute = true;
 input bool UseStopLoss = true;
 input bool UseTakeProfit = true;
 input int MagicNumber = 123456;
-input int PollInterval = 1000;
+input int PollInterval = 250;  // ms between polls (250 = 0.25s for lower latency)
 input string APIKey = "";
 input string SecretKey = "";
 input bool UseGETMethod = false;
@@ -42,6 +44,7 @@ input bool MaxLotSizeOnlyOnDrawdown = true;  // 🛡️⭐ Apply lot size cap on
 input bool CheckSymbolCorrelation = true;  // 🛡️⭐ Prevent opening highly correlated positions (e.g., GBPUSD + GBPJPY)
 input double BaseMaxSlippagePips = 3.0;
 input double VolatileSymbolSlippageMultiplier = 1.5;
+input int VolatilityThresholdPointsOverride = 300;  // Override volatility threshold (points). Helps reduce "Price moved too far" rejects.
 input bool AllowCriticalSignalOverride = true;
 input double CriticalSignalMaxExtraPips = 1.0;
 
@@ -109,7 +112,7 @@ input double MaxContractSizeMultiplier = 2.0;  // ⚠️ WARNING: Maximum multip
 input int NetworkStabilizationDelay = 300;
 input double ForexCommissionPerLot = 5.0;  // Commission per lot round trip for forex (USD) - FTMO actual: $5/lot
 input double GoldCommissionPerLot = 7.0;   // Commission per lot round trip for XAUUSD (USD) - FTMO actual: ~$7/lot
-input double LotSizeSlippageBufferPips = 0.5;  // Add extra pips to SL when sizing (reduces lots to absorb typical SL slippage, 0=disabled)
+input double LotSizeSlippageBufferPips = 2.5;  // 🎯 SL slippage buffer - reduces lots so NET LOSS at SL stays ≤ target ($650). 2.5 pips absorbs typical SL slippage (0.5 was too small → loss ~$672). Critical: 52% WR + 1:1 RR loses if risk > reward!
 input bool AccountForBrokerCosts = true;   // Include commission and spread in calculations
 input bool GrossProfitMatchesRisk = false;  // false = NET loss at SL = risk amount (commission included in sizing)
 input bool AdjustTargetForCosts = true;    // Adjust TP to maintain 1:1 R:R after costs (RECOMMENDED)
@@ -189,6 +192,9 @@ int recentSymbolsCount = 0;
 // Track trade close emails sent to prevent duplicates
 ulong tradeCloseEmailsSent[];
 int tradeCloseEmailsSentCount = 0;
+
+// Which backend delivered the last poll response - used for signal.source and emails
+string g_lastPollServerName = "";
 
 
 void CleanupRecentSymbols() {
@@ -1003,6 +1009,8 @@ bool TestConnection() {
          Print("TradingSignalEA:    Go to: Tools → Options → Expert Advisors");
          Print("TradingSignalEA:    Check 'Allow WebRequest for listed URL'");
          Print("TradingSignalEA:    Add this URL: ", ServerURL);
+         if(StringLen(ServerURL2) > 0)
+            Print("TradingSignalEA:    Also add (dual-server): ", ServerURL2);
          Print("TradingSignalEA: 2. Network connectivity issue");
          Print("TradingSignalEA: 3. DNS resolution failure");
          Print("TradingSignalEA: 4. SSL/TLS certificate problem");
@@ -1069,6 +1077,57 @@ void ParseTradingSymbols(string symbolsStr, string& symbols[]) {
 }
 
 //+------------------------------------------------------------------+
+//| Derive friendly server name from base URL (for logs and emails)  |
+//+------------------------------------------------------------------+
+string GetServerNameFromUrl(string baseUrl) {
+   if(baseUrl == "") return "Backend";
+   string lower = baseUrl;
+   StringToLower(lower);
+   if(StringFind(lower, "render") >= 0) return "Render";
+   return "Backend";
+}
+
+//+------------------------------------------------------------------+
+//| Poll for signals for a specific symbol with given base URL       |
+//| Returns true if HTTP 200 - only one server used per cycle to     |
+//| avoid double processing; duplicate signal IDs still filtered.    |
+//+------------------------------------------------------------------+
+bool PollForSignalsForSymbolWithURL(string baseUrl, string symbol, int timeframe, int timeoutMs) {
+   if(symbol == "" || symbol == "unknown") return false;
+   if(baseUrl == "") return false;
+   StringTrimLeft(baseUrl); StringTrimRight(baseUrl);
+   if(baseUrl == "") return false;
+
+   long account = AccountInfoInteger(ACCOUNT_LOGIN);
+   string url = baseUrl + "/signals/pending";
+   string postDataStr = StringFormat(
+      "{\"terminal\":\"MT5\",\"account\":%d,\"symbol\":\"%s\",\"timeframe\":%d}",
+      (int)account, symbol, timeframe
+   );
+   string headers = GenerateHeaders("POST");
+   if(DebugMode) Print("TradingSignalEA: Poll (POST) ", symbol, " -> ", baseUrl);
+
+   uchar postData[];
+   StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
+   uchar response[];
+   string responseHeaders;
+   int result = WebRequest("POST", url, headers, timeoutMs, postData, response, responseHeaders);
+
+   if(result == 200) {
+      string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
+      g_lastPollServerName = GetServerNameFromUrl(baseUrl);
+      if(DebugMode) Print("TradingSignalEA: Poll Success for ", symbol, " from ", g_lastPollServerName);
+      ProcessSignalsResponse(responseStr);
+      connectionManager.UpdateConnectionHealth(true);
+      lastSuccessfulPoll = TimeGMT();
+      return true;
+   }
+   if(DebugMode) Print("TradingSignalEA: Poll failed for ", symbol, " from ", baseUrl, " HTTP ", result);
+   connectionManager.UpdateConnectionHealth(false);
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Poll for signals for a specific symbol                          |
 //+------------------------------------------------------------------+
 void PollForSignalsForSymbol(string symbol, int timeframe) {
@@ -1076,83 +1135,56 @@ void PollForSignalsForSymbol(string symbol, int timeframe) {
       Print("TradingSignalEA: Invalid symbol for polling: ", symbol);
       return;
    }
-   
-   long account = AccountInfoInteger(ACCOUNT_LOGIN);
-   
-   string url = ServerURL + "/signals/pending";
-   string postDataStr = StringFormat(
-      "{\"terminal\":\"MT5\",\"account\":%d,\"symbol\":\"%s\",\"timeframe\":%d}",
-      (int)account,
-      symbol,
-      timeframe
-   );
-   
-   string headers = GenerateHeaders("POST");
-   if(DebugMode) {
-      Print("TradingSignalEA: Polling for ", symbol, " - POST Body: ", postDataStr);
-   }
-   
-   uchar postData[];
-   int arraySize = StringToCharArray(postDataStr, postData, 0, StringLen(postDataStr), CP_UTF8);
-   
-   uchar response[];
-   string responseHeaders;
-   int result = WebRequest("POST", url, headers, 5000, postData, response, responseHeaders);
-   
-   if(result == 200) {
-      string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
-      if(DebugMode) Print("TradingSignalEA: Poll Success for ", symbol, " - Response: ", responseStr);
-      ProcessSignalsResponse(responseStr);
-      connectionManager.UpdateConnectionHealth(true);
-      lastSuccessfulPoll = TimeGMT();
-   } else {
-      if(DebugMode) Print("TradingSignalEA: Poll Failed for ", symbol, " - HTTP Code: ", result);
-      if(ArraySize(response) > 0) {
-         string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
-         if(DebugMode) Print("TradingSignalEA: Poll Error Response for ", symbol, ": ", errorResponse);
-      }
-      connectionManager.UpdateConnectionHealth(false);
-   }
+   PollForSignalsForSymbolWithURL(ServerURL, symbol, timeframe, 5000);
 }
 
 //+------------------------------------------------------------------+
-//| Poll for new signals                                             |
+//| Poll for new signals (tries primary server first, then fallback) |
 //+------------------------------------------------------------------+
 void PollForSignals() {
-   Print("TradingSignalEA: Polling for signals (POST method)...");
-   
+   string url2 = ServerURL2;
+   StringTrimLeft(url2); StringTrimRight(url2);
+   bool useDual = (StringLen(url2) > 0);
+
+   if(useDual) Print("TradingSignalEA: Polling for signals (POST, dual-server: first ", ServerURL, " then ", url2, ")");
+   else       Print("TradingSignalEA: Polling for signals (POST method)...");
+
    int timeframe = Period();
    if(timeframe <= 0) timeframe = 15;
-   
-   // Determine which symbols to poll for
+
    if(EnableMultiSymbolTrading && !UseChartSymbolForPolling) {
-      // Poll for all symbols in TradingSymbols list
       string symbols[];
       ParseTradingSymbols(TradingSymbols, symbols);
-      
       int symbolCount = ArraySize(symbols);
       if(symbolCount > 0) {
          Print("TradingSignalEA: Multi-symbol mode - Polling for ", symbolCount, " symbols");
          for(int i = 0; i < symbolCount; i++) {
             if(symbols[i] != "") {
-               PollForSignalsForSymbol(symbols[i], timeframe);
-               // Small delay between requests to avoid overwhelming server
+               if(useDual) {
+                  if(!PollForSignalsForSymbolWithURL(ServerURL, symbols[i], timeframe, DualServerTimeoutMs))
+                     PollForSignalsForSymbolWithURL(url2, symbols[i], timeframe, DualServerTimeoutMs);
+               } else {
+                  PollForSignalsForSymbol(symbols[i], timeframe);
+               }
                Sleep(100);
             }
          }
       } else {
-         Print("TradingSignalEA: WARNING - No valid symbols found in TradingSymbols: ", TradingSymbols);
-         // Fallback to chart symbol
          string chartSymbol = Symbol();
          if(chartSymbol == "" || chartSymbol == "unknown") chartSymbol = "XAUUSD";
-         PollForSignalsForSymbol(chartSymbol, timeframe);
+         if(useDual) {
+            if(!PollForSignalsForSymbolWithURL(ServerURL, chartSymbol, timeframe, DualServerTimeoutMs))
+               PollForSignalsForSymbolWithURL(url2, chartSymbol, timeframe, DualServerTimeoutMs);
+         } else PollForSignalsForSymbol(chartSymbol, timeframe);
       }
    } else {
-      // Use chart symbol (original behavior)
       string symbol = Symbol();
       if(symbol == "" || symbol == "unknown") symbol = "XAUUSD";
       Print("TradingSignalEA: Single-symbol mode - Polling for chart symbol: ", symbol);
-      PollForSignalsForSymbol(symbol, timeframe);
+      if(useDual) {
+         if(!PollForSignalsForSymbolWithURL(ServerURL, symbol, timeframe, DualServerTimeoutMs))
+            PollForSignalsForSymbolWithURL(url2, symbol, timeframe, DualServerTimeoutMs);
+      } else PollForSignalsForSymbol(symbol, timeframe);
    }
 }
 
@@ -1185,6 +1217,7 @@ void ProcessSignalsResponse(const string response) {
             
             TradingSignal signal;
             if(ParseSignalData(signalStr, signal)) {
+               signal.source = (g_lastPollServerName != "") ? g_lastPollServerName : "Backend";
                ProcessSingleSignal(signal);
             }
             
@@ -1202,6 +1235,7 @@ void ProcessSignalsResponse(const string response) {
             
             TradingSignal signal;
             if(ParseSignalData(signalStr, signal)) {
+               signal.source = (g_lastPollServerName != "") ? g_lastPollServerName : "Backend";
                ProcessSingleSignal(signal);
             }
          }
@@ -1431,7 +1465,7 @@ void ProcessSingleSignal(const TradingSignal &signal) {
    }
 
             if(IsSignalAlreadyProcessed(signal.id)) {
-               Print("TradingSignalEA: Duplicate signal detected: ", signal.id, " - skipping");
+               Print("TradingSignalEA: Duplicate signal detected: ", signal.id, " - skipping (avoids double execution from both servers)");
                return;
             }
             
@@ -1484,7 +1518,7 @@ void ProcessSingleSignal(const TradingSignal &signal) {
       
       // Extra duplicate guards
       if(signalQueue.ContainsId(signal.id)) {
-         Print("TradingSignalEA: Signal ", signal.id, " already queued - skipping");
+         Print("TradingSignalEA: Signal ", signal.id, " already queued - skipping (no double from both servers)");
          return;
       }
       
@@ -2750,13 +2784,16 @@ bool ExecuteTrade(const TradingSignal& signal) {
    double point = SymbolInfoDouble(signal.symbol, SYMBOL_POINT);
    
    // Symbol-specific volatility thresholds (more lenient for different symbol types)
+   // VolatilityThresholdPointsOverride > 0 uses that for all symbols (e.g. 400 for XAUUSD to reduce rejections)
    double volatilityThreshold;
    string upperSymbol = signal.symbol;
    StringToUpper(upperSymbol);
    bool isMetal = (upperSymbol == "XAUUSD" || upperSymbol == "XAGUSD");
    bool isJPY = (StringFind(upperSymbol, "JPY") >= 0);
    
-   if(isMetal) {
+   if(VolatilityThresholdPointsOverride > 0) {
+      volatilityThreshold = point * (double)VolatilityThresholdPointsOverride;
+   } else if(isMetal) {
       volatilityThreshold = point * 200;  // Metals: 200 points (high volatility)
    } else if(isJPY) {
       volatilityThreshold = point * 130;  // JPY pairs: 130 points
@@ -2796,7 +2833,7 @@ bool ExecuteTrade(const TradingSignal& signal) {
    request.price = currentPrice;
    request.deviation = (uint)(maxSlippage * 10);
    request.magic = MagicNumber;
-   request.comment = "Signal: " + signal.id + " | Risk: " + DoubleToString(signal.risk_percent, 2) + "%";
+   request.comment = "Signal: " + signal.id + " | Risk: " + DoubleToString(signal.risk_percent, 2) + "%" + (signal.source != "" ? " | Source: " + signal.source : "");
    
   if(UseStopLoss && signal.stop > 0) {
       // Use EXACT stop loss from signal - NO BUFFER
@@ -3070,90 +3107,97 @@ int StringHash(string str) {
 }
 
 //+------------------------------------------------------------------+
-//| Poll for signals for a specific symbol (GET method)             |
+//| Poll for signals (GET) with given base URL; returns true if 200  |
 //+------------------------------------------------------------------+
-void PollForSignalsGETForSymbol(string symbol, int timeframe) {
-   if(symbol == "" || symbol == "unknown") {
-      Print("TradingSignalEA: Invalid symbol for GET polling: ", symbol);
-      return;
-   }
+bool PollForSignalsGETForSymbolWithURL(string baseUrl, string symbol, int timeframe, int timeoutMs) {
+   if(symbol == "" || symbol == "unknown") return false;
+   if(baseUrl == "") return false;
+   StringTrimLeft(baseUrl); StringTrimRight(baseUrl);
+   if(baseUrl == "") return false;
 
    string account = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
    string encodedSymbol = UrlEncode(symbol);
    string timeframeStr = IntegerToString(timeframe);
-
    string queryString = StringFormat("terminal=MT5&account=%s&symbol=%s&timeframe=%s", account, encodedSymbol, timeframeStr);
-   string url = ServerURL + "/signals/pending?" + queryString;
+   string url = baseUrl + "/signals/pending?" + queryString;
 
    string headers = GenerateHeaders("GET");
-   if(headers == "") {
-      Print("TradingSignalEA: GET poll request aborted (invalid headers)");
-      return;
-   }
+   if(headers == "") return false;
 
-   if(DebugMode) {
-      Print("TradingSignalEA: GET Poll for ", symbol, " - URL: ", url);
-   }
+   if(DebugMode) Print("TradingSignalEA: GET Poll ", symbol, " -> ", baseUrl);
 
    uchar emptyData[];
    uchar response[];
    string responseHeaders;
-   int result = WebRequest("GET", url, headers, 5000, emptyData, response, responseHeaders);
+   int result = WebRequest("GET", url, headers, timeoutMs, emptyData, response, responseHeaders);
 
    if(result == 200) {
       string responseStr = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
-      if(DebugMode) Print("TradingSignalEA: Received response (GET) for ", symbol, ": ", responseStr);
+      g_lastPollServerName = GetServerNameFromUrl(baseUrl);
+      if(DebugMode) Print("TradingSignalEA: GET Success for ", symbol, " from ", g_lastPollServerName);
       ProcessSignalsResponse(responseStr);
       connectionManager.UpdateConnectionHealth(true);
       lastSuccessfulPoll = TimeGMT();
-   } else {
-      if(DebugMode) Print("TradingSignalEA: Failed to poll for signals (GET) for ", symbol, ". HTTP code: ", result);
-      if(ArraySize(response) > 0) {
-         string errorResponse = CharArrayToString(response, 0, ArraySize(response), CP_UTF8);
-         if(DebugMode) Print("TradingSignalEA: GET Error Response for ", symbol, ": ", errorResponse);
-      }
-      connectionManager.UpdateConnectionHealth(false);
+      return true;
    }
+   if(DebugMode) Print("TradingSignalEA: GET failed for ", symbol, " from ", baseUrl, " HTTP ", result);
+   connectionManager.UpdateConnectionHealth(false);
+   return false;
 }
 
 //+------------------------------------------------------------------+
-//| Alternative polling method using GET                             |
+//| Poll for signals for a specific symbol (GET method)             |
+//+------------------------------------------------------------------+
+void PollForSignalsGETForSymbol(string symbol, int timeframe) {
+   if(symbol == "" || symbol == "unknown") return;
+   PollForSignalsGETForSymbolWithURL(ServerURL, symbol, timeframe, 5000);
+}
+
+//+------------------------------------------------------------------+
+//| Alternative polling method using GET (dual-server when URL2 set) |
 //+------------------------------------------------------------------+
 void PollForSignalsGET() {
-   Print("TradingSignalEA: Polling for signals (GET method)...");
+   string url2 = ServerURL2;
+   StringTrimLeft(url2); StringTrimRight(url2);
+   bool useDual = (StringLen(url2) > 0);
+
+   if(useDual) Print("TradingSignalEA: Polling for signals (GET, dual-server: first ", ServerURL, " then ", url2, ")");
+   else       Print("TradingSignalEA: Polling for signals (GET method)...");
 
    int timeframe = Period();
    if(timeframe <= 0) timeframe = 15;
 
-   // Determine which symbols to poll for
    if(EnableMultiSymbolTrading && !UseChartSymbolForPolling) {
-      // Poll for all symbols in TradingSymbols list
       string symbols[];
       ParseTradingSymbols(TradingSymbols, symbols);
-      
       int symbolCount = ArraySize(symbols);
       if(symbolCount > 0) {
          Print("TradingSignalEA: Multi-symbol mode (GET) - Polling for ", symbolCount, " symbols");
          for(int i = 0; i < symbolCount; i++) {
             if(symbols[i] != "") {
-               PollForSignalsGETForSymbol(symbols[i], timeframe);
-               // Small delay between requests to avoid overwhelming server
+               if(useDual) {
+                  if(!PollForSignalsGETForSymbolWithURL(ServerURL, symbols[i], timeframe, DualServerTimeoutMs))
+                     PollForSignalsGETForSymbolWithURL(url2, symbols[i], timeframe, DualServerTimeoutMs);
+               } else PollForSignalsGETForSymbol(symbols[i], timeframe);
                Sleep(100);
             }
          }
       } else {
-         Print("TradingSignalEA: WARNING - No valid symbols found in TradingSymbols: ", TradingSymbols);
-         // Fallback to chart symbol
          string chartSymbol = Symbol();
          if(chartSymbol == "" || chartSymbol == "unknown") chartSymbol = "XAUUSD";
-         PollForSignalsGETForSymbol(chartSymbol, timeframe);
+         if(useDual) {
+            if(!PollForSignalsGETForSymbolWithURL(ServerURL, chartSymbol, timeframe, DualServerTimeoutMs))
+               PollForSignalsGETForSymbolWithURL(url2, chartSymbol, timeframe, DualServerTimeoutMs);
+         } else PollForSignalsGETForSymbol(chartSymbol, timeframe);
       }
    } else {
-      // Use chart symbol (original behavior)
       string symbol = Symbol();
       if(symbol == "" || symbol == "unknown") symbol = "XAUUSD";
       Print("TradingSignalEA: Single-symbol mode (GET) - Polling for chart symbol: ", symbol);
-      PollForSignalsGETForSymbol(symbol, timeframe);
+      if(useDual) {
+         if(!PollForSignalsGETForSymbolWithURL(ServerURL, symbol, timeframe, DualServerTimeoutMs))
+            PollForSignalsGETForSymbolWithURL(url2, symbol, timeframe, DualServerTimeoutMs);
+      } else PollForSignalsGETForSymbol(symbol, timeframe);
    }
 }
 
@@ -3842,10 +3886,12 @@ void SendTradeExecutionEmail(const TradingSignal& signal, const MqlTradeResult& 
     : StringFormat("Target: %.5f", displayTarget);
   string fillPriceStr = (actualFillPrice > 0) ? DoubleToString(actualFillPrice, 5) : "N/A";
 
+  string sourceStr = (signal.source != "") ? signal.source : "N/A";
   string body = StringFormat(
     "Signal ID: %s\n"
     "Symbol: %s\n"
     "Action: %s\n"
+    "Signal Source: %s\n"
     "Signal Entry: %.5f\n"
     "Stop: %.5f\n"
     "%s\n"
@@ -3861,6 +3907,7 @@ void SendTradeExecutionEmail(const TradingSignal& signal, const MqlTradeResult& 
     signal.id,
     signal.symbol,
     actionStr,
+    sourceStr,
     signal.entry,
     signal.stop,
     targetLine,
@@ -4339,10 +4386,12 @@ void SendSignalRejectionEmail(const TradingSignal& signal, string rejectionReaso
   double priceDiffLocal = (signal.action == ORDER_TYPE_BUY) ? (signal.entry - signal.stop) : (signal.stop - signal.entry);
   if(pipSizeLocal > 0) stopPips = priceDiffLocal / pipSizeLocal;
   
+  string sourceStr = (signal.source != "") ? signal.source : "N/A";
   string body = StringFormat(
     "Signal ID: %s\n"
     "Symbol: %s\n"
     "Action: %s\n"
+    "Signal Source: %s\n"
     "Entry: %.5f\n"
     "Stop: %.5f\n"
     "Target: %.5f\n"
@@ -4355,6 +4404,7 @@ void SendSignalRejectionEmail(const TradingSignal& signal, string rejectionReaso
     signal.id,
     signal.symbol,
     actionStr,
+    sourceStr,
     signal.entry,
     signal.stop,
     signal.target,

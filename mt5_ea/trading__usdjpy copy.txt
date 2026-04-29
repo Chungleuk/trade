@@ -132,7 +132,7 @@ loss_color = input.color(#ff0000, "LOSS Color", group=G_SIGNAL)
 
 // Advanced Filter Settings
 volumeConfirmation = input.bool(true, "Require Volume Confirmation", group=G_ADV)
-minVolumeIncrease = input.float(1.8, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.1, group=G_ADV, tooltip="Stricter volume confirmation for higher-quality setups")
+minVolumeIncrease = input.float(1.8, "Min Volume Increase Factor", minval=1.0, maxval=5.0, step=0.01, group=G_ADV, tooltip="Stricter volume confirmation for higher-quality setups")
 useTrendFilter = input.bool(true, "Use Trend Filter", group=G_ADV)
 useVolatilityFilter = input.bool(true, "Use Volatility Filter", group=G_ADV)
 minVolatilityPercentile = input.int(40, "Min Volatility Percentile", minval=0, maxval=100, group=G_ADV, tooltip="Higher threshold to avoid low-volatility noise on 15M")
@@ -738,12 +738,13 @@ var float pendingSellOriginalStop = na
 var bool pendingSellSignal = false
 
 // Bar N: Store pending when bar closes and conditions pass (uses allBuyFiltersPass for consistency)
+// Target = entry ± (risk distance × rrRatio), rounded to mintick so alert/backtest use exact RR (1.1, 1.2, etc.)
 if ((waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation) and allBuyFiltersPass
     pendingBuyEntry := close
     pendingBuyStop := currentWaveLow
     pendingBuyOriginalStop := currentWaveLow
     targetRiskDistance = math.max(close - currentWaveLow, syminfo.mintick * 5)
-    pendingBuyTarget := close + targetRiskDistance * rrRatio
+    pendingBuyTarget := math.round((close + (targetRiskDistance * rrRatio)) / syminfo.mintick) * syminfo.mintick
     pendingBuySignal := true
     lastPivotHigh := na
 else
@@ -754,7 +755,7 @@ if ((waitForConfirmation and barstate.isconfirmed) or not waitForConfirmation) a
     pendingSellStop := currentWaveHigh
     pendingSellOriginalStop := currentWaveHigh
     targetRiskDistance = math.max(currentWaveHigh - close, syminfo.mintick * 5)
-    pendingSellTarget := close - targetRiskDistance * rrRatio
+    pendingSellTarget := math.round((close - (targetRiskDistance * rrRatio)) / syminfo.mintick) * syminfo.mintick
     pendingSellSignal := true
     lastPivotLow := na
 else
@@ -1042,22 +1043,24 @@ if not inTrade
         timeStamp = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss'Z'}", time)
         currentTradeId := syminfo.ticker + "_T" + str.tostring(tradeIdCounter) + "-" + timeStamp
         
-        // Calculate RR based on original stop (used for target calculation), not Chandelier stop
-        // This ensures RR matches the configured ratio
+        // Calculate RR based on original stop (used for target calculation)
         stopForRR = not na(buy_original_stop) ? buy_original_stop : buy_stop
-        actualRR = calculateRR(true, buy_entry, buy_target, stopForRR)
+        // Recompute target from entry, stop and rrRatio so alert/backtest always use exact RR (1.1, 1.2, etc.)
+        buyRiskDist = math.max(buy_entry - stopForRR, syminfo.mintick)
+        actualTarget = math.round((buy_entry + (buyRiskDist * rrRatio)) / syminfo.mintick) * syminfo.mintick
+        actualRR = calculateRR(true, buy_entry, actualTarget, stopForRR)
         formattedEntry = formatPriceForAlert(buy_entry)
-        formattedTarget = str.tostring(buy_target, "#.###")
+        formattedTarget = str.tostring(actualTarget, "#.###")
         formattedStop = str.tostring(buy_stop, "#.###")
         currentTimeframe = timeframe.period
         riskPercentage = str.tostring(maxRiskPercent, "#.#") + "%"
         
-        alertMsg = '{"action": "BUY", "symbol": "' + syminfo.ticker + '", "timeframe": "' + currentTimeframe + '", "entry": "' + formattedEntry + '", "target": "' + formattedTarget + '", "stop": "' + formattedStop + '", "id": "' + currentTradeId + '", "rr": "' + str.tostring(actualRR, "#.##") + '", "risk": "' + riskPercentage + '", "time": "' + timeStamp + '"}'
+        alertMsg = '{"action": "BUY", "symbol": "' + syminfo.ticker + '", "timeframe": "' + currentTimeframe + '", "entry": "' + formattedEntry + '", "target": "' + formattedTarget + '", "stop": "' + formattedStop + '", "id": "' + currentTradeId + '", "rr": "' + str.tostring(actualRR, "#.##") + '", "rr_setting": "' + str.tostring(rrRatio, "#.#") + '", "risk": "' + riskPercentage + '", "time": "' + timeStamp + '"}'
         
         inTrade := true
         tradeCompleted := false
         currentEntry := buy_entry
-        currentTarget := buy_target
+        currentTarget := actualTarget
         currentStop := buy_stop
         isBuyTrade := true
         entryBarIndex := bar_index
@@ -1075,22 +1078,24 @@ if not inTrade
         timeStamp = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss'Z'}", time)
         currentTradeId := syminfo.ticker + "_T" + str.tostring(tradeIdCounter) + "-" + timeStamp
         
-        // Calculate RR based on original stop (used for target calculation), not Chandelier stop
-        // This ensures RR matches the configured ratio
+        // Calculate RR based on original stop (used for target calculation)
         stopForRR = not na(sell_original_stop) ? sell_original_stop : sell_stop
-        actualRR = calculateRR(false, sell_entry, sell_target, stopForRR)
+        // Recompute target from entry, stop and rrRatio so alert/backtest always use exact RR (1.1, 1.2, etc.)
+        sellRiskDist = math.max(stopForRR - sell_entry, syminfo.mintick)
+        actualTarget = math.round((sell_entry - (sellRiskDist * rrRatio)) / syminfo.mintick) * syminfo.mintick
+        actualRR = calculateRR(false, sell_entry, actualTarget, stopForRR)
         formattedEntry = formatPriceForAlert(sell_entry)
-        formattedTarget = str.tostring(sell_target, "#.###")
+        formattedTarget = str.tostring(actualTarget, "#.###")
         formattedStop = str.tostring(sell_stop, "#.###")
         currentTimeframe = timeframe.period
         riskPercentage = str.tostring(maxRiskPercent, "#.#") + "%"
         
-        alertMsg = '{"action": "SELL", "symbol": "' + syminfo.ticker + '", "timeframe": "' + currentTimeframe + '", "entry": "' + formattedEntry + '", "target": "' + formattedTarget + '", "stop": "' + formattedStop + '", "id": "' + currentTradeId + '", "rr": "' + str.tostring(actualRR, "#.##") + '", "risk": "' + riskPercentage + '", "time": "' + timeStamp + '"}'
+        alertMsg = '{"action": "SELL", "symbol": "' + syminfo.ticker + '", "timeframe": "' + currentTimeframe + '", "entry": "' + formattedEntry + '", "target": "' + formattedTarget + '", "stop": "' + formattedStop + '", "id": "' + currentTradeId + '", "rr": "' + str.tostring(actualRR, "#.##") + '", "rr_setting": "' + str.tostring(rrRatio, "#.#") + '", "risk": "' + riskPercentage + '", "time": "' + timeStamp + '"}'
         
         inTrade := true
         tradeCompleted := false
         currentEntry := sell_entry
-        currentTarget := sell_target
+        currentTarget := actualTarget
         currentStop := sell_stop
         isBuyTrade := false
         entryBarIndex := bar_index
@@ -1154,13 +1159,15 @@ formatMoney(value) =>
 // Create labels when signals are generated (use non-na values to ensure display)
 if show_labels
     if showBuySignal and not na(buy_entry) and not na(buy_target) and not na(buy_stop)
-        // Use original stop for RR calculation to match configured ratio
+        // Use RR-exact target (same as alert/backtest) so label matches configured ratio (1.1, 1.2, etc.)
         stopForRRDisplay = not na(buy_original_stop) ? buy_original_stop : buy_stop
-        rrActual = calculateRR(true, buy_entry, buy_target, stopForRRDisplay)
+        buyLabelRisk = math.max(buy_entry - stopForRRDisplay, syminfo.mintick)
+        buyLabelTarget = math.round((buy_entry + (buyLabelRisk * rrRatio)) / syminfo.mintick) * syminfo.mintick
+        rrActual = calculateRR(true, buy_entry, buyLabelTarget, stopForRRDisplay)
         tradeIdForLabel = not na(currentTradeId) ? currentTradeId : syminfo.ticker + "_T" + str.tostring(tradeIdCounter + 1)
         buy_text = "BUY\n" +
                   "Entry: " + formatPrice(buy_entry) + "\n" +
-                  "Target: " + formatPrice(buy_target) + "\n" +
+                  "Target: " + formatPrice(buyLabelTarget) + "\n" +
                   "Stop: " + formatPrice(buy_stop) + "\n" +
                   "RR: " + str.tostring(rrActual, "#.##") + ":1\n" +
                   "ID: " + tradeIdForLabel + "\n" +
@@ -1170,13 +1177,15 @@ if show_labels
              textalign=text.align_center)
     
     if showSellSignal and not na(sell_entry) and not na(sell_target) and not na(sell_stop)
-        // Use original stop for RR calculation to match configured ratio
+        // Use RR-exact target (same as alert/backtest) so label matches configured ratio (1.1, 1.2, etc.)
         stopForRRDisplay = not na(sell_original_stop) ? sell_original_stop : sell_stop
-        rrActual = calculateRR(false, sell_entry, sell_target, stopForRRDisplay)
+        sellLabelRisk = math.max(stopForRRDisplay - sell_entry, syminfo.mintick)
+        sellLabelTarget = math.round((sell_entry - (sellLabelRisk * rrRatio)) / syminfo.mintick) * syminfo.mintick
+        rrActual = calculateRR(false, sell_entry, sellLabelTarget, stopForRRDisplay)
         tradeIdForLabel = not na(currentTradeId) ? currentTradeId : syminfo.ticker + "_T" + str.tostring(tradeIdCounter + 1)
         sell_text = "SELL\n" +
                    "Entry: " + formatPrice(sell_entry) + "\n" +
-                   "Target: " + formatPrice(sell_target) + "\n" +
+                   "Target: " + formatPrice(sellLabelTarget) + "\n" +
                    "Stop: " + formatPrice(sell_stop) + "\n" +
                    "RR: " + str.tostring(rrActual, "#.##") + ":1\n" +
                    "ID: " + tradeIdForLabel + "\n" +

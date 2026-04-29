@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { Activity, BarChart3 } from 'lucide-react';
+import { ManualSignalForm } from './components/ManualSignalForm';
+import { PositionSizingModeToggle } from './components/PositionSizingModeToggle';
 import { SimpleWebhookDisplay } from './components/SimpleWebhookDisplay';
 import { SetupInstructions } from './components/SetupInstructions';
 import { AlertsList } from './components/AlertsList';
@@ -24,6 +26,8 @@ function App() {
   
   const [activeTab, setActiveTab] = useState<'alerts' | 'analytics' | 'setup'>('alerts');
   const [analyticsRefreshTrigger, setAnalyticsRefreshTrigger] = useState(0);
+  /** Bumps when an alert outcome updates sizing so ManualSignalForm can refetch that pair’s node */
+  const [positionSizingNonce, setPositionSizingNonce] = useState(0);
   const [notification, setNotification] = useState<{
     message: string;
     type: 'success' | 'error' | 'warning' | 'info';
@@ -64,6 +68,7 @@ function App() {
       if (success) {
         showNotification('Alert deleted successfully', 'success');
         setAnalyticsRefreshTrigger(prev => prev + 1); // Trigger analytics refresh
+        setPositionSizingNonce((n) => n + 1);
       } else {
         showNotification('Failed to delete alert', 'error');
       }
@@ -73,10 +78,16 @@ function App() {
   };
 
   const handleMarkOutcome = async (alertId: string, outcome: 'win' | 'loss') => {
-    const success = await updateAlertOutcome(alertId, outcome);
-    if (success) {
-      showNotification(`Alert marked as ${outcome} and completed`, 'success');
+    const result = await updateAlertOutcome(alertId, outcome);
+    if (result.success) {
+      const sym = result.pairKey ? ` for ${result.pairKey}` : '';
+      const riskHint =
+        result.nextSuggestedRiskPercent != null
+          ? ` Next suggested risk${sym}: ${result.nextSuggestedRiskPercent}%.`
+          : '';
+      showNotification(`Alert marked as ${outcome} and completed.${riskHint}`, 'success');
       setAnalyticsRefreshTrigger(prev => prev + 1); // Trigger analytics refresh
+      setPositionSizingNonce((n) => n + 1);
     } else {
       showNotification('Failed to mark alert outcome', 'error');
     }
@@ -104,6 +115,7 @@ function App() {
       
       // Trigger analytics refresh
       setAnalyticsRefreshTrigger(prev => prev + 1);
+      setPositionSizingNonce((n) => n + 1);
       
       showNotification(`Successfully deleted ${deletedCount} alert(s) for ${symbol}`, 'success');
     } catch (err) {
@@ -117,12 +129,16 @@ function App() {
       {/* Header */}
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
-            <div className="flex items-center">
-              <Activity className="w-8 h-8 text-blue-600 mr-3" />
+          <div className="flex flex-wrap justify-between items-center gap-3 min-h-16 py-2">
+            <div className="flex items-center min-w-0">
+              <Activity className="w-8 h-8 text-blue-600 mr-3 shrink-0" />
               <h1 className="text-xl font-semibold text-gray-900">Trading Alert Dashboard</h1>
             </div>
-            <div className="flex items-center space-x-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <PositionSizingModeToggle
+                onModeApplied={() => setPositionSizingNonce((n) => n + 1)}
+              />
+              <div className="flex items-center space-x-4">
               <div className={`px-3 py-2 rounded-md text-sm font-medium cursor-pointer transition-colors ${
                 activeTab === 'alerts' 
                   ? 'bg-blue-100 text-blue-700' 
@@ -147,6 +163,7 @@ function App() {
                 Setup
               </div>
             </div>
+            </div>
           </div>
         </div>
       </header>
@@ -164,6 +181,12 @@ function App() {
         {/* Tab Content */}
         {activeTab === 'alerts' && (
           <div className="space-y-6">
+            <ManualSignalForm
+              onSaved={fetchAlerts}
+              onNotify={showNotification}
+              sizingStateNonce={positionSizingNonce}
+              onSizingStateChanged={() => setPositionSizingNonce((n) => n + 1)}
+            />
             <SimpleWebhookDisplay />
             
             <AlertsList

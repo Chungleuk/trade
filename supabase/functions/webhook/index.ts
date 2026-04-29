@@ -1,27 +1,54 @@
-interface TradingViewAlert {
-  action?: string;
-  symbol?: string;
-  timeframe?: string;
-  entry?: string;
-  target?: string;
-  stop?: string;
+import { createClient, SupabaseClient } from "npm:@supabase/supabase-js@2";
+
+interface ParsedAlert {
+  id: string;
+  action: string;
+  symbol: string;
+  timeframe: string;
+  entry: string;
+  target: string | null;
+  stop: string | null;
   rr?: string;
   risk?: string;
-  id?: string;
-  message?: string;
+  rawMessage: string;
+  strategyName?: string;
+}
+
+const FETCH_TIMEOUT_MS = 8000;
+/**
+ * TradingView closes the connection after ~3s.
+ * We aim to respond well before this to reduce timeouts.
+ */
+const TV_RESPONSE_DEADLINE_MS = 1800;
+
+// Cached Supabase client -- reused across requests in the same isolate
+let _supabase: SupabaseClient | null = null;
+function getSupabaseClient(): SupabaseClient | null {
+  if (_supabase) return _supabase;
+  const url = Deno.env.get("SUPABASE_URL");
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+    return null;
+  }
+  _supabase = createClient(url, key);
+  return _supabase;
+}
+
+function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
 // Email notification function
-async function sendEmailNotification(alert: any) {
+async function sendEmailNotification(alert: any): Promise<boolean> {
   try {
-    // Try EmailJS first if configured (skip if placeholder)
     const emailJsUserId = Deno.env.get("EMAILJS_USER_ID") || "";
     if (emailJsUserId && !emailJsUserId.includes("your_")) {
-      const emailJSResponse = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
+      const emailJSResponse = await fetchWithTimeout("https://api.emailjs.com/api/v1.0/email/send", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           service_id: Deno.env.get("EMAILJS_SERVICE_ID") || "service_trading_alerts",
           template_id: Deno.env.get("EMAILJS_TEMPLATE_ID") || "template_alert",
@@ -31,7 +58,7 @@ async function sendEmailNotification(alert: any) {
             subject: `📧 FIRST EMAIL - 🚨 Trading Alert: ${alert.action} ${alert.symbol}`,
             alert_action: alert.action,
             alert_symbol: alert.symbol,
-            alert_entry: alert.entry,
+            alert_entry: alert.entry || "N/A",
             alert_timeframe: alert.timeframe || "15",
             alert_target: alert.target || "N/A",
             alert_stop: alert.stop || "N/A",
@@ -47,9 +74,9 @@ async function sendEmailNotification(alert: any) {
         console.log("Email sent successfully via EmailJS");
         return true;
       }
+      console.warn("EmailJS returned non-OK:", emailJSResponse.status, await emailJSResponse.text());
     }
 
-    // Formspree fallback (or primary if EmailJS not configured)
     return await sendWebhookEmail(alert);
   } catch (error) {
     console.error("Error sending email:", error);
@@ -57,13 +84,19 @@ async function sendEmailNotification(alert: any) {
   }
 }
 
-// Webhook-based email using Formspree
+// Webhook-based email using Formspree. Requires FORMSPREE_URL to be a valid form
+// from https://formspree.io (e.g. https://formspree.io/f/YOUR_FORM_ID).
 async function sendWebhookEmail(alert: any) {
   try {
-    const formspreeUrl = Deno.env.get("FORMSPREE_URL") || "https://formspree.io/f/xpznvqko";
+    const formspreeUrl = Deno.env.get("FORMSPREE_URL") || "";
+    if (!formspreeUrl || !formspreeUrl.includes("formspree.io")) {
+      console.warn("FORMSPREE_URL not set or invalid. Create a form at formspree.io and set FORMSPREE_URL in Supabase secrets.");
+      return sendSimpleNotification(alert);
+    }
+
     const recipientEmail = Deno.env.get("ALERT_EMAIL") || "leechungleuk@gmail.com";
 
-    const response = await fetch(formspreeUrl, {
+    const response = await fetchWithTimeout(formspreeUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -77,7 +110,7 @@ async function sendWebhookEmail(alert: any) {
 
 Action: ${alert.action}
 Symbol: ${alert.symbol}
-Entry Price: ${alert.entry}
+Entry Price: ${alert.entry?.toString()?.trim() ? alert.entry : "N/A"}
 Timeframe: ${alert.timeframe || "15"}m
 ${alert.target ? `Target: ${alert.target}` : ''}
 ${alert.stop ? `Stop Loss: ${alert.stop}` : ''}
@@ -97,21 +130,29 @@ Sent from TradingView Alert Dashboard
       })
     });
 
+    const responseText = await response.text();
     if (response.ok) {
       console.log("Email sent successfully via webhook");
       return true;
-    } else {
-      console.error("Webhook email failed:", await response.text());
-      return await sendSimpleNotification(alert);
     }
+
+    // Form not found = form ID in FORMSPREE_URL is wrong or form was deleted
+    if (responseText.includes("FORM_NOT_FOUND") || responseText.includes("Form not found")) {
+      console.error(
+        "Formspree form not found. Create a new form at https://formspree.io, copy the form endpoint URL (e.g. https://formspree.io/f/xxxxx), and set Supabase secret: supabase secrets set FORMSPREE_URL=<your-url>"
+      );
+    } else {
+      console.error("Webhook email failed:", responseText);
+    }
+    return sendSimpleNotification(alert);
   } catch (error) {
     console.error("Webhook email error:", error);
-    return await sendSimpleNotification(alert);
+    return sendSimpleNotification(alert);
   }
 }
 
-// Final fallback - log only (Formspree failed)
-async function sendSimpleNotification(alert: any) {
+// Final fallback - log only (Formspree failed or not configured)
+function sendSimpleNotification(alert: any): false {
   const recipient = Deno.env.get("ALERT_EMAIL") || "leechungleuk@gmail.com";
   console.log("📧 Email fallback: Formspree failed. Alert logged (no email sent):", {
     action: alert.action,
@@ -120,13 +161,14 @@ async function sendSimpleNotification(alert: any) {
     recipient,
     timestamp: new Date().toISOString()
   });
+  console.log("📧 To fix: create a form at https://formspree.io and set Supabase secret FORMSPREE_URL to your form URL.");
   return false;
 }
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, x-webhook-secret",
 };
 
 Deno.serve(async (req: Request) => {
@@ -138,13 +180,12 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  // Handle GET requests (when someone clicks the URL in browser)
   if (req.method === "GET") {
     return new Response(
       JSON.stringify({
         message: "TradingView Webhook Endpoint",
         status: "Active and ready to receive POST requests",
-        usage: "This endpoint accepts POST requests from TradingView alerts",
+        usage: "POST JSON alert here. Responds within ~1.8s to avoid TradingView 3s timeout.",
         timestamp: new Date().toISOString()
       }),
       {
@@ -155,7 +196,6 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Only accept POST requests for webhooks
     if (req.method !== "POST") {
       return new Response(
         JSON.stringify({ error: "Method not allowed" }),
@@ -164,6 +204,24 @@ Deno.serve(async (req: Request) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         }
       );
+    }
+
+    // Optional webhook secret: if WEBHOOK_SECRET is set, require it in the request
+    const webhookSecret = Deno.env.get("WEBHOOK_SECRET") || "";
+    if (webhookSecret) {
+      const providedSecret =
+        req.headers.get("x-webhook-secret") ||
+        new URL(req.url).searchParams.get("secret") ||
+        "";
+      if (providedSecret !== webhookSecret) {
+        return new Response(
+          JSON.stringify({
+            error: "Unauthorized",
+            hint: "TradingView cannot send custom headers. Add the secret to the URL: https://YOUR_PROJECT.supabase.co/functions/v1/webhook?secret=YOUR_SECRET",
+          }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
     }
 
     // Parse the incoming webhook data (TradingView: application/json or text/plain, 3s timeout)
@@ -217,82 +275,134 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Create Supabase client
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    
-    const { createClient } = await import("npm:@supabase/supabase-js@2");
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
-    // Use risk from alert if valid (0.01-100), else default. Position sizing updates in background.
-    const riskFromAlert = parsedAlert.risk ? String(parsedAlert.risk).replace(/%/g, "").trim() : "";
-    const parsedRisk = /^\d+(\.\d+)?$/.test(riskFromAlert) ? parseFloat(riskFromAlert) : 0.65;
-    const riskPercent = (parsedRisk >= 0.01 && parsedRisk <= 100) ? parsedRisk.toFixed(2) : "0.65";
-
-    const { data, error } = await supabase
-      .from("trading_alerts")
-      .insert({
-        action: parsedAlert.action,
-        symbol: parsedAlert.symbol,
-        timeframe: parsedAlert.timeframe || "15",
-        entry: parsedAlert.entry,
-        target: parsedAlert.target || null,
-        stop: parsedAlert.stop || null,
-        rr: parsedAlert.rr || null,
-        risk: riskPercent,
-        alert_id: parsedAlert.id || generateAlertId(),
-        message: parsedAlert.rawMessage || JSON.stringify(alertData),
-        status: "active",
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Database error:", error);
-      return new Response(
-        JSON.stringify({ error: "Failed to save alert" }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      return new Response(JSON.stringify({ error: "Server misconfigured" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
-    console.log("Alert saved successfully:", data);
-
-    // Return 200 IMMEDIATELY to TradingView (must respond within 3 seconds)
-    // Email runs in background - do NOT await before responding
-    const responsePayload = {
-      success: true,
-      message: "Alert received and saved. Email notification running in background.",
-      alert: data,
+    const RISK_MAP: Record<string, number> = {
+      'Start': 0.65, '1-0': 0.58, '0-1': 0.73, '2-0': 0.44, '1-1': 0.73, '0-2': 0.73,
+      '3-0': 0.25, '2-1': 0.62, '1-2': 0.83, '0-3': 0.62, '4-0': 0.08, '3-1': 0.41,
+      '2-2': 0.83, '1-3': 0.83, '0-4': 0.41, '4-1': 0.17, '3-2': 0.66, '2-3': 0.99,
+      '1-4': 0.66, '0-5': 0.17, '4-2': 0.33, '3-3': 0.99, '2-4': 0.99, '1-5': 0.33,
+      '4-3': 0.66, '3-4': 1.33, '2-5': 0.66, '4-4': 1.33, '3-5': 1.33, '4-5': 2.65,
     };
 
-    // STEP 0: Update risk from position_sizing_state in background (non-blocking)
-    (async () => {
+    // Resolve risk quickly: cap position_sizing_state lookup at 300ms so we don't block the save
+    const RISK_LOOKUP_TIMEOUT_MS = 300;
+    async function getRiskPercent(): Promise<string> {
       try {
         const sizingMode = (Deno.env.get("POSITION_SIZING_MODE") || "global").toLowerCase();
         const groupKey = sizingMode === "per_pair" ? (parsedAlert.symbol || "UNKNOWN").toUpperCase() : "GLOBAL";
-        const { data: state } = await supabase.from('position_sizing_state').select('*').eq('group_key', groupKey).maybeSingle();
-        const node = state?.current_node || 'Start';
-        const map: Record<string, number> = {
-          'Start': 0.65, '1-0': 0.58, '0-1': 0.73, '2-0': 0.44, '1-1': 0.73, '0-2': 0.73,
-          '3-0': 0.25, '2-1': 0.62, '1-2': 0.83, '0-3': 0.62, '4-0': 0.08, '3-1': 0.41,
-          '2-2': 0.83, '1-3': 0.83, '0-4': 0.41, '4-1': 0.17, '3-2': 0.66, '2-3': 0.99,
-          '1-4': 0.66, '0-5': 0.17, '4-2': 0.33, '3-3': 0.99, '2-4': 0.99, '1-5': 0.33,
-          '4-3': 0.66, '3-4': 1.33, '2-5': 0.66, '4-4': 1.33, '3-5': 1.33, '4-5': 2.65,
-        };
-        const computedRisk = (map[node] ?? 0.65).toFixed(2);
-        if (computedRisk !== riskPercent) {
-          await supabase.from("trading_alerts").update({ risk: computedRisk }).eq("id", data.id);
-          console.log("✅ Position sizing risk updated:", computedRisk);
-        }
+        const timeoutPromise = new Promise<string>((resolve) =>
+          setTimeout(() => resolve("0.65"), RISK_LOOKUP_TIMEOUT_MS)
+        );
+        const sizingPromise = supabase
+          .from('position_sizing_state')
+          .select('current_node')
+          .eq('group_key', groupKey)
+          .maybeSingle()
+          .then(({ data: state }) => {
+            const node = state?.current_node || 'Start';
+            return (RISK_MAP[node] ?? 0.65).toFixed(2);
+          })
+          .catch(() => "0.65");
+        return await Promise.race([sizingPromise, timeoutPromise]);
       } catch (e) {
-        console.warn("Position sizing background update skipped:", e);
+        console.warn("Position sizing lookup failed, using 0.65%:", e);
+        return "0.65";
       }
-    })();
+    }
 
-    // STEP 1: Send immediate email in background (non-blocking)
+    async function saveAlert(): Promise<{ data: any; riskPercent: string }> {
+      const riskPercent = await getRiskPercent();
+      const alertId = parsedAlert.id || generateAlertId();
+      const { data, error } = await supabase
+        .from("trading_alerts")
+        .insert({
+          action: parsedAlert.action,
+          symbol: parsedAlert.symbol,
+          timeframe: parsedAlert.timeframe || "15",
+          entry: parsedAlert.entry != null ? String(parsedAlert.entry) : "",
+          target: parsedAlert.target || null,
+          stop: parsedAlert.stop || null,
+          rr: parsedAlert.rr || null,
+          risk: riskPercent,
+          alert_id: alertId,
+          message: parsedAlert.rawMessage || JSON.stringify(alertData),
+          status: "active",
+        })
+        .select('id, alert_id, action, symbol, entry, risk, status, created_at')
+        .single();
+      if (error) throw error;
+      return { data, riskPercent };
+    }
+
+    const deadline = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("TV_DEADLINE")), TV_RESPONSE_DEADLINE_MS)
+    );
+
+    let result: { data: any; riskPercent: string };
+    try {
+      result = await Promise.race([saveAlert(), deadline]);
+    } catch (e) {
+      if (e instanceof Error && e.message === "TV_DEADLINE") {
+        console.warn("Responding within TradingView deadline; save and email in background.");
+        (async () => {
+          try {
+            const riskPercent = await getRiskPercent();
+            const alertId = parsedAlert.id || generateAlertId();
+            const { error } = await supabase
+              .from("trading_alerts")
+              .insert({
+                action: parsedAlert.action,
+                symbol: parsedAlert.symbol,
+                timeframe: parsedAlert.timeframe || "15",
+                entry: parsedAlert.entry != null ? String(parsedAlert.entry) : "",
+                target: parsedAlert.target || null,
+                stop: parsedAlert.stop || null,
+                rr: parsedAlert.rr || null,
+                risk: riskPercent,
+                alert_id: alertId,
+                message: parsedAlert.rawMessage || JSON.stringify(alertData),
+                status: "active",
+              });
+            if (error) console.error("Background save on deadline failed:", error);
+            else console.log("Alert saved in background:", alertId);
+            await sendEmailNotification({
+              action: parsedAlert.action,
+              symbol: parsedAlert.symbol,
+              entry: parsedAlert.entry,
+              target: parsedAlert.target,
+              stop: parsedAlert.stop,
+              rr: parsedAlert.rr,
+              timeframe: parsedAlert.timeframe || "15",
+              risk: `${riskPercent}%`,
+              rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
+            });
+          } catch (_) { /* ignore */ }
+        })();
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Alert received; processing may be delayed. Check your dashboard.",
+          }),
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      console.error("Database error:", e);
+      return new Response(
+        JSON.stringify({ error: "Failed to save alert" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const { data, riskPercent } = result;
+    console.log("Alert saved:", data.alert_id);
+
     (async () => {
       try {
         const sent = await sendEmailNotification({
@@ -306,43 +416,15 @@ Deno.serve(async (req: Request) => {
           risk: `${riskPercent}%`,
           rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
         });
-        if (sent) {
-          console.log("✅ Email notification sent successfully");
-        } else {
-          sendSimpleNotification({
-            action: parsedAlert.action,
-            symbol: parsedAlert.symbol,
-            entry: parsedAlert.entry,
-            target: parsedAlert.target,
-            stop: parsedAlert.stop,
-            rr: parsedAlert.rr,
-            timeframe: parsedAlert.timeframe || "15",
-            risk: `${riskPercent}%`,
-            rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
-          });
-        }
-      } catch (immediateEmailError) {
-        console.error("❌ Email failed:", immediateEmailError);
-        sendSimpleNotification({
-          action: parsedAlert.action,
-          symbol: parsedAlert.symbol,
-          entry: parsedAlert.entry,
-          target: parsedAlert.target,
-          stop: parsedAlert.stop,
-          rr: parsedAlert.rr,
-          timeframe: parsedAlert.timeframe || "15",
-          risk: `${riskPercent}%`,
-          rawMessage: parsedAlert.rawMessage || JSON.stringify(alertData)
-        });
+        console.log(sent ? "✅ Email sent" : "⚠️ Email failed (logged)");
+      } catch (emailError) {
+        console.error("❌ Email error:", emailError);
       }
     })();
 
     return new Response(
-      JSON.stringify(responsePayload),
-      {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ success: true, message: "Alert received and saved.", alert: data }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
 
   } catch (error) {
@@ -367,7 +449,7 @@ function parseAlert(rawData: any): any | null {
         action: rawData.action.toString().toUpperCase(),
         symbol: rawData.symbol.toString().toUpperCase(),
         timeframe: rawData.timeframe || "15",
-        entry: String(rawData.entry),
+        entry: rawData.entry != null ? String(rawData.entry) : "",
         target: rawData.target != null ? String(rawData.target) : null,
         stop: rawData.stop != null ? String(rawData.stop) : null,
         rr: rawData.rr,
@@ -399,8 +481,8 @@ function isValidJsonAlert(data: any): boolean {
   const action = data.action?.toString().toUpperCase();
   if (action !== "BUY" && action !== "SELL") return false;
   if (data.symbol == null || (typeof data.symbol !== "string" && typeof data.symbol !== "number")) return false;
-  const entry = data.entry;
-  return entry !== undefined && entry !== null && (typeof entry === "string" || typeof entry === "number");
+  if (data.entry != null && typeof data.entry !== "string" && typeof data.entry !== "number") return false;
+  return true;
 }
 
 function parseTradingViewMessage(message: string): any | null {
@@ -441,7 +523,7 @@ function parseGenericObject(data: any): any | null {
   const symbol = extractSymbol(data);
   const entry = extractEntry(data);
 
-  if (!action || !symbol || !entry) {
+  if (!action || !symbol) {
     return null;
   }
 
@@ -452,7 +534,7 @@ function parseGenericObject(data: any): any | null {
     action,
     symbol: symbol.toUpperCase(),
     timeframe: data.timeframe || data.tf || "15",
-    entry,
+    entry: entry ?? "",
     target: target != null ? String(target) : null,
     stop: stop != null ? String(stop) : null,
     rr: data.rr || data.risk_reward,
@@ -491,7 +573,7 @@ function extractEntry(data: any): string | null {
   const entryFields = ["entry", "price", "entry_price", "fill_price", "close"];
   
   for (const field of entryFields) {
-    if (data[field]) {
+    if (data[field] != null && data[field] !== "") {
       return data[field].toString();
     }
   }
@@ -500,5 +582,5 @@ function extractEntry(data: any): string | null {
 }
 
 function generateAlertId(): string {
-  return `alert_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  return `alert_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
 }

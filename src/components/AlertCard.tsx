@@ -142,11 +142,13 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
           </div>
         </div>
 
-        <div className="flex items-start gap-4">
-          <div className="text-2xl font-bold text-gray-900 mb-1">
-            {alert.entry}
+        <div className="flex items-start gap-4 flex-wrap">
+          <div>
+            <div className="text-2xl font-bold text-gray-900 mb-1 tabular-nums">
+              {alert.entry?.trim() ? alert.entry : '—'}
+            </div>
+            <div className="text-sm text-gray-600">Entry {alert.entry?.trim() ? 'price' : '(not set)'}</div>
           </div>
-          <div className="text-sm text-gray-600">Entry Price</div>
           <div className="flex items-center gap-1 text-xs text-gray-500 mt-2">
             <Clock className="w-3 h-3" />
             <span>{date}</span>

@@ -28,7 +28,11 @@ export class EmailService {
    */
   async sendViaFormspree(emailContent) {
     try {
-      const formspreeUrl = process.env.FORMSPREE_URL || 'https://formspree.io/f/xpznvqko';
+      const formspreeUrl = process.env.FORMSPREE_URL || '';
+      if (!formspreeUrl || !formspreeUrl.includes('formspree.io')) {
+        logger.warn('FORMSPREE_URL not set or invalid. Create a form at formspree.io and set FORMSPREE_URL env var.');
+        return false;
+      }
       
       const response = await fetch(formspreeUrl, {
         method: 'POST',
@@ -68,7 +72,7 @@ export class EmailService {
         <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0;">
           <p><strong>Action:</strong> ${alert.action}</p>
           <p><strong>Symbol:</strong> ${alert.symbol}</p>
-          <p><strong>Entry:</strong> ${alert.entry}</p>
+          <p><strong>Entry:</strong> ${alert.entry !== '' && alert.entry != null ? alert.entry : 'N/A'}</p>
           <p><strong>Target:</strong> ${alert.target || 'N/A'}</p>
           <p><strong>Stop:</strong> ${alert.stop || 'N/A'}</p>
           <p><strong>Risk:</strong> ${alert.risk || '0.65%'}</p>
@@ -88,7 +92,7 @@ export class EmailService {
 
 Action: ${alert.action}
 Symbol: ${alert.symbol}
-Entry: ${alert.entry}
+Entry: ${alert.entry !== '' && alert.entry != null ? alert.entry : 'N/A'}
 Target: ${alert.target || 'N/A'}
 Stop: ${alert.stop || 'N/A'}
 Risk: ${alert.risk || '0.65%'}

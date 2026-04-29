@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Search, Filter, TrendingUp, AlertTriangle, RefreshCw, Loader2, Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Trash2 } from 'lucide-react';
+import { Search, Filter, TrendingUp, AlertTriangle, RefreshCw, Loader2, Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Trash2, ArrowUpDown } from 'lucide-react';
 import { TradingAlert } from '../types/alert';
 import { AlertCard } from './AlertCard';
 
@@ -27,6 +27,12 @@ export const AlertsList: React.FC<AlertsListProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [filterAction, setFilterAction] = useState<'ALL' | 'BUY' | 'SELL'>('ALL');
   const [filterStatus, setFilterStatus] = useState<'ALL' | 'active' | 'completed' | 'stopped'>('ALL');
+  /** win | loss | none | ALL — filter by marked outcome */
+  const [filterOutcome, setFilterOutcome] = useState<'ALL' | 'win' | 'loss' | 'none'>('ALL');
+  type SortOption = 'newest' | 'oldest' | 'symbol_asc' | 'symbol_desc';
+  const [sortBy, setSortBy] = useState<SortOption>('newest');
+  /** Comma-separated symbols (manual quick filter), e.g. XAUUSD, EURUSD */
+  const [manualSymbolsInput, setManualSymbolsInput] = useState('');
   const [groupDropdownOpen, setGroupDropdownOpen] = useState(false);
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
@@ -40,18 +46,74 @@ export const AlertsList: React.FC<AlertsListProps> = ({
     return Array.from(set).sort();
   }, [alerts]);
 
+  const manualSymbolTokens = useMemo(() => {
+    return manualSymbolsInput
+      .split(/[\s,;]+/)
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+  }, [manualSymbolsInput]);
+
   const filteredAlerts = useMemo(() => {
-    return alerts.filter(alert => {
-      const matchesSearch = alert.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                           alert.id.toLowerCase().includes(searchTerm.toLowerCase());
+    const list = alerts.filter((alert) => {
+      const sym = alert.symbol.toLowerCase();
+      const id = alert.id.toLowerCase();
+      const msg = (alert.message || alert.rawMessage || '').toLowerCase();
+      const matchesSearch =
+        searchTerm === '' ||
+        sym.includes(searchTerm.toLowerCase()) ||
+        id.includes(searchTerm.toLowerCase()) ||
+        msg.includes(searchTerm.toLowerCase());
       const matchesFilter = filterAction === 'ALL' || alert.action === filterAction;
       const matchesStatus = filterStatus === 'ALL' || alert.status === filterStatus;
-      const matchesGroup = selectedGroups.length === 0
-        ? true
-        : selectedGroups.includes(alert.symbol.toUpperCase());
-      return matchesSearch && matchesFilter && matchesStatus && matchesGroup;
+      const matchesGroup =
+        selectedGroups.length === 0 || selectedGroups.includes(alert.symbol.toUpperCase());
+      const matchesManualSymbols =
+        manualSymbolTokens.length === 0 ||
+        manualSymbolTokens.includes(alert.symbol.toUpperCase());
+      let matchesOutcome = true;
+      if (filterOutcome === 'win') matchesOutcome = alert.outcome === 'win';
+      else if (filterOutcome === 'loss') matchesOutcome = alert.outcome === 'loss';
+      else if (filterOutcome === 'none') matchesOutcome = !alert.outcome;
+
+      return (
+        matchesSearch &&
+        matchesFilter &&
+        matchesStatus &&
+        matchesGroup &&
+        matchesManualSymbols &&
+        matchesOutcome
+      );
     });
-  }, [alerts, searchTerm, filterAction, filterStatus, selectedGroups]);
+
+    const parseTime = (a: TradingAlert) => new Date(a.timestamp).getTime();
+
+    return [...list].sort((a, b) => {
+      switch (sortBy) {
+        case 'oldest':
+          return parseTime(a) - parseTime(b);
+        case 'symbol_asc': {
+          const c = a.symbol.localeCompare(b.symbol);
+          return c !== 0 ? c : parseTime(b) - parseTime(a);
+        }
+        case 'symbol_desc': {
+          const c = b.symbol.localeCompare(a.symbol);
+          return c !== 0 ? c : parseTime(b) - parseTime(a);
+        }
+        case 'newest':
+        default:
+          return parseTime(b) - parseTime(a);
+      }
+    });
+  }, [
+    alerts,
+    searchTerm,
+    filterAction,
+    filterStatus,
+    filterOutcome,
+    selectedGroups,
+    manualSymbolTokens,
+    sortBy,
+  ]);
 
   // Pagination calculations
   const totalPages = Math.ceil(filteredAlerts.length / itemsPerPage);
@@ -62,7 +124,7 @@ export const AlertsList: React.FC<AlertsListProps> = ({
   // Reset to first page when filters change
   React.useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, filterAction, filterStatus, selectedGroups, itemsPerPage]);
+  }, [searchTerm, filterAction, filterStatus, filterOutcome, selectedGroups, itemsPerPage, manualSymbolTokens, sortBy]);
 
   // Close dropdowns when clicking outside
   React.useEffect(() => {
@@ -269,7 +331,8 @@ export const AlertsList: React.FC<AlertsListProps> = ({
         <div>
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-semibold text-gray-900">
-              Trading Alerts ({filteredAlerts.length})
+              Trading Alerts ({filteredAlerts.length}
+              {filteredAlerts.length !== alerts.length ? ` of ${alerts.length}` : ''})
             </h2>
             {onRefresh && (
               <button
@@ -283,8 +346,8 @@ export const AlertsList: React.FC<AlertsListProps> = ({
             )}
           </div>
           <p className="text-gray-600 text-sm mt-1">
-            Real-time alerts from your TradingView strategies
-            {totalPages > 1 && ` • Page ${currentPage} of ${totalPages}`}
+            Real-time alerts from your TradingView strategies and manual signals — use filters to narrow the list.
+            {totalPages > 1 && ` Page ${currentPage} of ${totalPages}.`}
           </p>
         </div>
 
@@ -452,6 +515,75 @@ export const AlertsList: React.FC<AlertsListProps> = ({
         </div>
       </div>
 
+      <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-800">
+            <ArrowUpDown className="w-4 h-4 text-slate-500" aria-hidden />
+            Filters & sort
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchTerm('');
+              setFilterAction('ALL');
+              setFilterStatus('ALL');
+              setFilterOutcome('ALL');
+              setSelectedGroups([]);
+              setManualSymbolsInput('');
+              setSortBy('newest');
+            }}
+            className="text-sm text-blue-600 hover:text-blue-800 hover:underline"
+          >
+            Clear all filters
+          </button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="md:col-span-2">
+            <label className="block text-xs font-medium text-slate-600 mb-1">
+              Symbols (type manually, comma-separated)
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. XAUUSD, EURUSD, GBPUSD — leave empty for all"
+              value={manualSymbolsInput}
+              onChange={(e) => setManualSymbolsInput(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+            />
+            <p className="text-xs text-slate-500 mt-1">
+              Matches any listed symbol. Works together with the Groups picker and other filters.
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Outcome</label>
+            <select
+              value={filterOutcome}
+              onChange={(e) =>
+                setFilterOutcome(e.target.value as 'ALL' | 'win' | 'loss' | 'none')
+              }
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="ALL">All outcomes</option>
+              <option value="none">No outcome yet</option>
+              <option value="win">Win</option>
+              <option value="loss">Loss</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Sort</label>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as SortOption)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="symbol_asc">Symbol A → Z</option>
+              <option value="symbol_desc">Symbol Z → A</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
         <div className="space-y-3">
           {loading ? (
@@ -465,18 +597,15 @@ export const AlertsList: React.FC<AlertsListProps> = ({
           ) : (
             <>
               <div className="p-4">
-                {currentAlerts.map((alert) => {
-                  console.log('Rendering AlertCard for alert:', alert.id, 'onDelete available:', !!onDelete);
-                  return (
-                    <AlertCard 
-                      key={alert.id} 
-                      alert={alert} 
-                      onUpdateStatus={onUpdateStatus}
-                      onMarkOutcome={onMarkOutcome}
-                      onDelete={onDelete}
-                    />
-                  );
-                })}
+                {currentAlerts.map((alert) => (
+                  <AlertCard
+                    key={alert.id}
+                    alert={alert}
+                    onUpdateStatus={onUpdateStatus}
+                    onMarkOutcome={onMarkOutcome}
+                    onDelete={onDelete}
+                  />
+                ))}
               </div>
               <PaginationControls />
             </>

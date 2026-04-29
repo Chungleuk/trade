@@ -31,7 +31,7 @@ export class SupabaseService {
         .insert({
           action: alertData.action,
           symbol: alertData.symbol,
-          entry: alertData.entry,
+          entry: alertData.entry !== '' && alertData.entry != null ? String(alertData.entry) : '',
           target: alertData.target,
           stop: alertData.stop,
           timeframe: alertData.timeframe || '15',

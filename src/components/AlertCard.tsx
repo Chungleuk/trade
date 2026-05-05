@@ -1,16 +1,33 @@
 import React from 'react';
-import { TrendingUp, TrendingDown, Clock, Target, Shield, DollarSign, MoreVertical, CheckCircle, XCircle, Trash2, Trophy, TrendingDown as LossIcon, Minus } from 'lucide-react';
+import { TrendingUp, TrendingDown, Clock, Target, Shield, DollarSign, MoreVertical, CheckCircle, XCircle, Trash2, Trophy, TrendingDown as LossIcon, Minus, PenLine, Loader2 } from 'lucide-react';
 import { TradingAlert } from '../types/alert';
+import { AlertParsingService } from '../services/alertParsingService';
+import { splitManualMessage, buildManualStoredMessage } from '../lib/manualAlertMessage';
 
 interface AlertCardProps {
   alert: TradingAlert;
   onUpdateStatus?: (alertId: string, status: 'active' | 'completed' | 'stopped') => void;
   onMarkOutcome?: (alertId: string, outcome: 'win' | 'loss') => void;
   onDelete?: (alertId: string) => void;
+  onSaveManualMessage?: (alertId: string, message: string) => Promise<boolean>;
 }
 
-export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onMarkOutcome, onDelete }) => {
+export const AlertCard: React.FC<AlertCardProps> = ({
+  alert,
+  onUpdateStatus,
+  onMarkOutcome,
+  onDelete,
+  onSaveManualMessage,
+}) => {
   const [showActions, setShowActions] = React.useState(false);
+  const [editingNotes, setEditingNotes] = React.useState(false);
+  const [draftNotes, setDraftNotes] = React.useState('');
+  const [savingNotes, setSavingNotes] = React.useState(false);
+
+  React.useEffect(() => {
+    setEditingNotes(false);
+  }, [alert.id]);
+  const isManual = AlertParsingService.isManualEntryAlert(alert);
   const isBuy = alert.action === 'BUY';
   const actionColor = isBuy ? 'text-green-600' : 'text-red-600';
   const outcomeBorderColor = alert.outcome === 'win'
@@ -57,12 +74,62 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
 
   const { date, time } = formatDate(alert.timestamp);
   const outcomeDisplay = getOutcomeDisplay(alert.outcome);
+  const manualParts =
+    isManual && alert.message ? splitManualMessage(alert.message) : null;
+
+  const startEditingNotes = () => {
+    const parts = isManual && alert.message ? splitManualMessage(alert.message) : null;
+    setDraftNotes(parts?.notesSection ?? '');
+    setEditingNotes(true);
+  };
+
+  const handleSaveNotes = async () => {
+    if (!manualParts || !onSaveManualMessage) return;
+    setSavingNotes(true);
+    try {
+      const newMessage = buildManualStoredMessage(
+        manualParts.label,
+        manualParts.pasteSection,
+        draftNotes.trim() || null
+      );
+      const ok = await onSaveManualMessage(alert.id, newMessage);
+      if (ok) setEditingNotes(false);
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
+  /** Light green / red wash on the whole card when outcome is set (keeps manual violet accents blended in). */
+  const surfaceClass =
+    alert.outcome === 'win'
+      ? isManual
+        ? 'pt-9 ring-2 ring-violet-300/90 ring-inset bg-gradient-to-br from-green-50/90 via-violet-50/80 to-indigo-50/35'
+        : 'pt-6 bg-gradient-to-br from-green-50/95 via-green-50/60 to-white'
+      : alert.outcome === 'loss'
+        ? isManual
+          ? 'pt-9 ring-2 ring-violet-300/90 ring-inset bg-gradient-to-br from-red-50/90 via-violet-50/80 to-indigo-50/35'
+          : 'pt-6 bg-gradient-to-br from-red-50/95 via-red-50/60 to-white'
+        : isManual
+          ? 'pt-9 ring-2 ring-violet-300/90 ring-inset bg-gradient-to-br from-violet-50/95 via-white to-indigo-50/30'
+          : 'pt-6 bg-white';
 
   return (
-    <div className={`bg-white border-l-4 ${borderColor} rounded-lg shadow-sm hover:shadow-md transition-shadow p-6`}>
-      <div className="flex items-start justify-between">
-        <div className="flex-1">
-          <div className="flex items-center gap-3 mb-3">
+    <div
+      className={`relative border-l-4 ${borderColor} rounded-lg shadow-sm hover:shadow-md transition-colors transition-shadow px-6 pb-6 ${surfaceClass}`}
+    >
+      {isManual && (
+        <div
+          className="absolute top-0 right-4 -translate-y-1/2 flex items-center gap-1.5 rounded-full border border-violet-400/90 bg-gradient-to-r from-violet-600 to-indigo-600 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-white shadow-md sm:right-6"
+          title="Logged from the Manual signal form — not a TradingView webhook"
+        >
+          <PenLine className="h-3 w-3 opacity-95" aria-hidden />
+          Manual
+        </div>
+      )}
+
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 flex-1 lg:pr-4">
+          <div className="mb-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <div className={`p-2 rounded-lg ${bgColor}`}>
               {isBuy ? (
                 <TrendingUp className={`w-5 h-5 ${actionColor}`} />
@@ -70,35 +137,40 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
                 <TrendingDown className={`w-5 h-5 ${actionColor}`} />
               )}
             </div>
-            <div>
-              <div className="flex items-center gap-2 text-sm text-gray-600">
-                <span className="font-medium text-gray-900">{alert.symbol}</span>
-                <span>•</span>
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-600">
+                <span className="font-semibold text-gray-900">{alert.symbol}</span>
+                <span className="text-gray-400">•</span>
                 <span>{alert.timeframe}m</span>
-                <span>•</span>
-                <span>ID: {alert.id}</span>
                 {alert.status && (
                   <>
-                    <span>•</span>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(alert.status)}`}>
+                    <span className="text-gray-400">•</span>
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${getStatusColor(alert.status)}`}>
                       {alert.status.toUpperCase()}
                     </span>
                   </>
                 )}
                 {outcomeDisplay && (
                   <>
-                    <span>•</span>
-                    <span className="text-xs text-gray-600">Outcome:</span>
-                    <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${outcomeDisplay.color}`}>
-                      <outcomeDisplay.icon className="w-3 h-3" />
+                    <span className="text-gray-400">•</span>
+                    <span className="text-xs text-gray-500">Outcome</span>
+                    <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${outcomeDisplay.color}`}>
+                      <outcomeDisplay.icon className="w-3 h-3 shrink-0" />
                       {outcomeDisplay.label}
                     </div>
                   </>
                 )}
               </div>
-              <div className={`text-lg font-semibold ${actionColor}`}>
-                {alert.action}
+              <div className="flex flex-wrap items-baseline gap-2">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400">Alert id</span>
+                <span
+                  className="font-mono text-[11px] text-gray-600 truncate max-w-[min(100%,14rem)] sm:max-w-md"
+                  title={alert.id}
+                >
+                  {alert.id}
+                </span>
               </div>
+              <div className={`text-lg font-bold tracking-tight ${actionColor}`}>{alert.action}</div>
             </div>
           </div>
 
@@ -285,25 +357,105 @@ export const AlertCard: React.FC<AlertCardProps> = ({ alert, onUpdateStatus, onM
       </div>
 
       {alert.message && (
-        <div className="mt-4 p-3 bg-gray-50 rounded-lg">
-          <div className="text-sm text-gray-700">
-            {alert.message}
-            {alert.strategyName && (
-              <div className="text-xs text-gray-500 mt-1">
-                Strategy: {alert.strategyName}
+        <div className="mt-4">
+          {isManual && manualParts ? (
+            <div className="overflow-hidden rounded-xl border border-violet-300/90 bg-violet-100/35 shadow-inner shadow-violet-100/50">
+              <div className="flex flex-wrap items-center gap-2 border-b border-violet-200/80 bg-gradient-to-r from-violet-200/50 to-indigo-100/50 px-3 py-2">
+                <span className="rounded-md bg-white/80 px-2 py-0.5 font-sans text-xs font-semibold text-violet-900 shadow-sm">
+                  {manualParts.label}
+                </span>
               </div>
-            )}
-          </div>
-        </div>
-      )}
 
-      {outcomeDisplay && (
-        <div className="mt-3 flex items-center gap-2">
-          <span className="text-xs text-gray-600">Outcome:</span>
-          <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${outcomeDisplay.color}`}>
-            <outcomeDisplay.icon className="w-3 h-3" />
-            {outcomeDisplay.label}
-          </div>
+              <div className="space-y-3 px-3 py-3">
+                {manualParts.pasteSection && (
+                  <div>
+                    {manualParts.label.includes('pasted') && (
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-800/80">
+                        Pasted
+                      </div>
+                    )}
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-violet-950/95">
+                      {manualParts.pasteSection}
+                    </pre>
+                  </div>
+                )}
+
+                {!manualParts.pasteSection && !editingNotes && (
+                  <p className="text-xs text-violet-800/70">
+                    No pasted text. Paste is optional when you create a signal in the Manual signal form.
+                  </p>
+                )}
+
+                <div
+                  className={
+                    manualParts.pasteSection ? 'border-t border-violet-200/80 pt-3' : ''
+                  }
+                >
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-800/80">
+                      Notes
+                    </div>
+                    {onSaveManualMessage && !editingNotes && (
+                      <button
+                        type="button"
+                        onClick={startEditingNotes}
+                        className="text-xs font-medium text-violet-700 hover:text-violet-900 underline underline-offset-2"
+                      >
+                        {manualParts.notesSection ? 'Edit notes' : 'Add notes'}
+                      </button>
+                    )}
+                  </div>
+
+                  {editingNotes ? (
+                    <div className="space-y-2">
+                      <textarea
+                        value={draftNotes}
+                        onChange={(e) => setDraftNotes(e.target.value)}
+                        rows={4}
+                        className="w-full rounded-lg border border-violet-300 bg-white px-3 py-2 text-sm text-violet-950 shadow-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                        placeholder="Your notes for this trade…"
+                        disabled={savingNotes}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveNotes()}
+                          disabled={savingNotes}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+                        >
+                          {savingNotes && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />}
+                          Save notes
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingNotes(false)}
+                          disabled={savingNotes}
+                          className="rounded-lg border border-violet-300 bg-white px-3 py-1.5 text-xs font-medium text-violet-800 hover:bg-violet-50 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : manualParts.notesSection ? (
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-violet-950/95">
+                      {manualParts.notesSection}
+                    </pre>
+                  ) : (
+                    <p className="text-xs italic text-violet-700/80">No notes yet — use Add notes to write some.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg bg-gray-50 p-3">
+              <div className="text-sm text-gray-700">
+                {alert.message}
+                {alert.strategyName && (
+                  <div className="mt-1 text-xs text-gray-500">Strategy: {alert.strategyName}</div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

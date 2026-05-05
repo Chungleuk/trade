@@ -6,6 +6,7 @@ import { AlertService } from '../services/alertService';
 import { getCurrentNode, getGroupKeyForSymbol, getRiskPercentForNode, resetNodeToStart } from '../services/positionSizingService';
 import { resolveSizingGroupKey } from '../lib/positionSizingMode';
 import { TradingAlert } from '../types/alert';
+import { buildManualStoredMessage } from '../lib/manualAlertMessage';
 
 function isoToDatetimeLocalValue(iso: string): string {
   const d = new Date(iso);
@@ -44,6 +45,8 @@ export const ManualSignalForm: React.FC<ManualSignalFormProps> = ({
   const [timeframe, setTimeframe] = useState('15');
   const [signalDateTime, setSignalDateTime] = useState(defaultDatetimeLocal);
   const [pasteText, setPasteText] = useState('');
+  /** Optional free-form notes; stored on the alert and shown on the card */
+  const [notesText, setNotesText] = useState('');
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
 
@@ -106,6 +109,14 @@ export const ManualSignalForm: React.FC<ManualSignalFormProps> = ({
   };
 
   const handleSave = async () => {
+    const paste = pasteText.trim();
+    const notes = notesText.trim();
+    const messageBody = buildManualStoredMessage(
+      paste ? 'Manual signal (pasted)' : 'Manual signal',
+      paste || null,
+      notes || null
+    );
+
     const alertDraft: Omit<TradingAlert, 'timestamp'> = {
       id: AlertParsingService.generateAlertId(),
       action,
@@ -116,10 +127,8 @@ export const ManualSignalForm: React.FC<ManualSignalFormProps> = ({
       stop: stop.trim() || undefined,
       rr: rrPreview ?? undefined,
       status: 'active',
-      message: pasteText.trim()
-        ? `Manual signal (pasted)`
-        : `Manual signal`,
-      rawMessage: pasteText.trim() || undefined,
+      message: messageBody,
+      rawMessage: undefined,
       createdAt: signalDateTime
         ? new Date(signalDateTime).toISOString()
         : undefined,
@@ -148,6 +157,7 @@ export const ManualSignalForm: React.FC<ManualSignalFormProps> = ({
       await loadSizingForSymbol(symbol);
       onSaved?.();
       setPasteText('');
+      setNotesText('');
     } finally {
       setSaving(false);
     }
@@ -266,6 +276,17 @@ export const ManualSignalForm: React.FC<ManualSignalFormProps> = ({
         >
           Apply paste to form
         </button>
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">Notes (optional)</label>
+        <textarea
+          value={notesText}
+          onChange={(e) => setNotesText(e.target.value)}
+          placeholder="Your comments for this signal — shown on the alert card after save."
+          rows={3}
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">

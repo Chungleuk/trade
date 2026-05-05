@@ -21,6 +21,7 @@ function App() {
     fetchAlerts, 
     updateAlertStatus, 
     updateAlertOutcome,
+    updateAlertMessage,
     deleteAlert 
   } = useWebhookAlerts();
   
@@ -54,6 +55,13 @@ function App() {
     } else {
       showNotification('Failed to update alert status', 'error');
     }
+  };
+
+  const handleSaveManualMessage = async (alertId: string, message: string) => {
+    const ok = await updateAlertMessage(alertId, message);
+    if (ok) showNotification('Notes saved', 'success');
+    else showNotification('Failed to save notes', 'error');
+    return ok;
   };
 
   const handleDeleteAlert = async (alertId: string) => {
@@ -198,6 +206,7 @@ function App() {
               onMarkOutcome={handleMarkOutcome}
               onDelete={handleDeleteAlert}
               onDeleteByGroup={handleDeleteByGroup}
+              onSaveManualMessage={handleSaveManualMessage}
             />
           </div>
         )}

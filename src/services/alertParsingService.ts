@@ -195,6 +195,11 @@ export class AlertParsingService {
     return `alert_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 
+  /** True for alerts created via the Manual signal form (message is stored with this prefix). */
+  static isManualEntryAlert(alert: { message?: string }): boolean {
+    return (alert.message ?? '').trimStart().startsWith('Manual signal');
+  }
+
   /**
    * Parse analyst-style multi-line pastes, e.g.
    * "XAUUSD, 29/4/2026\nSELL\nTarget: 4633.418\nStop Loss: 4670.115"

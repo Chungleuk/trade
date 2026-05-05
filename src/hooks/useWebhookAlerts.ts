@@ -266,6 +266,44 @@ export const useWebhookAlerts = () => {
     setError(null);
   }, []);
 
+  /** Update stored `message` (e.g. manual signal notes). */
+  const updateAlertMessage = useCallback(async (alertId: string, message: string) => {
+    let previousAlert: TradingAlert | undefined;
+    setAlerts((prev) =>
+      prev.map((a) => {
+        if (a.id === alertId) {
+          previousAlert = a;
+          return { ...a, message };
+        }
+        return a;
+      })
+    );
+
+    try {
+      const { data: updatedAlert, error } = await AlertService.updateAlert(alertId, { message });
+      if (error || !updatedAlert) {
+        setAlerts((prev) =>
+          prev.map((a) => (a.id === alertId && previousAlert ? previousAlert : a))
+        );
+        return false;
+      }
+      setAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...a, ...updatedAlert } : a)));
+      try {
+        const { data: fresh } = await AlertService.getAlerts({ limit: 100 });
+        if (fresh && Array.isArray(fresh)) setAlerts(fresh);
+      } catch {
+        /* ignore */
+      }
+      return true;
+    } catch (err) {
+      console.error('Error updating alert message:', err);
+      setAlerts((prev) =>
+        prev.map((a) => (a.id === alertId && previousAlert ? previousAlert : a))
+      );
+      return false;
+    }
+  }, []);
+
   return {
     alerts,
     loading,
@@ -277,6 +315,7 @@ export const useWebhookAlerts = () => {
     updateAlertStatus,
     updateAlertOutcome,
     deleteAlert,
-    clearAlerts
+    clearAlerts,
+    updateAlertMessage
   };
 };

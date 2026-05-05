@@ -12,6 +12,7 @@ interface AlertsListProps {
   onMarkOutcome?: (alertId: string, outcome: 'win' | 'loss') => void;
   onDelete?: (alertId: string) => void;
   onDeleteByGroup?: (symbol: string) => Promise<void>;
+  onSaveManualMessage?: (alertId: string, message: string) => Promise<boolean>;
 }
 
 export const AlertsList: React.FC<AlertsListProps> = ({ 
@@ -22,7 +23,8 @@ export const AlertsList: React.FC<AlertsListProps> = ({
   onUpdateStatus, 
   onMarkOutcome,
   onDelete,
-  onDeleteByGroup
+  onDeleteByGroup,
+  onSaveManualMessage
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterAction, setFilterAction] = useState<'ALL' | 'BUY' | 'SELL'>('ALL');
@@ -604,6 +606,7 @@ export const AlertsList: React.FC<AlertsListProps> = ({
                     onUpdateStatus={onUpdateStatus}
                     onMarkOutcome={onMarkOutcome}
                     onDelete={onDelete}
+                    onSaveManualMessage={onSaveManualMessage}
                   />
                 ))}
               </div>

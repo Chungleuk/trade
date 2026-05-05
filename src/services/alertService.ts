@@ -41,7 +41,8 @@ const mapAlertToInsert = (alert: Omit<TradingAlert, 'timestamp'>): AlertInsert =
   rr: alert.rr || null,
   risk: alert.risk || null,
   alert_id: alert.id, // Keep this for backward compatibility
-  message: alert.rawMessage || alert.message || null,
+  /** Prefer user-facing message (e.g. “Manual signal”) over raw paste / JSON. */
+  message: alert.message || alert.rawMessage || null,
   status: alert.status || 'active',
   outcome: alert.outcome || null,
   ...(alert.createdAt ? { created_at: alert.createdAt } : {}),
